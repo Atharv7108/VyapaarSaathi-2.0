@@ -141,14 +141,14 @@ def download_audio(media_url: str, destination_dir: Path) -> Path:
 
     response = requests.get(
         media_url,
-        auth=(settings.twilio_account_sid, settings.twilio_auth_token),
+        headers={"Authorization": f"Bearer {settings.whatsapp_api_token}"},
         timeout=45,
     )
 
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
-        raise RuntimeError(f"Unable to download Twilio media: {exc}") from exc
+        raise RuntimeError(f"Unable to download WhatsApp media: {exc}") from exc
 
     extension = _guess_extension(response.headers.get("Content-Type", ""), media_url)
     audio_path = destination_dir / f"incoming{extension}"
@@ -524,29 +524,29 @@ def save_to_db(phone: str, extracted_data: Dict[str, Any], audio_url: str, catal
 def send_whatsapp_reply(to_phone: str, body: str, media_url: Optional[str] = None) -> str:
     settings = get_settings()
 
-    try:
-        client_class = getattr(importlib.import_module("twilio.rest"), "Client")
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("twilio package is required for WhatsApp replies") from exc
-
-    client = client_class(settings.twilio_account_sid, settings.twilio_auth_token)
-    from_number = _normalize_whatsapp_number(settings.twilio_whatsapp_number)
-    recipient = _normalize_whatsapp_number(to_phone)
-
-    payload: Dict[str, Any] = {
-        "from_": from_number,
-        "to": recipient,
-        "body": body,
+    url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {settings.whatsapp_api_token}",
+        "Content-Type": "application/json",
     }
-    if media_url:
-        payload["media_url"] = [media_url]
+    
+    recipient = to_phone.replace("whatsapp:", "").replace("+", "")
+    
+    payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": "text",
+        "text": {"preview_url": False, "body": body}
+    }
 
     try:
-        message = client.messages.create(**payload)
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("messages", [{}])[0].get("id", "")
     except Exception as exc:
-        raise RuntimeError(f"Twilio send failed: {exc}") from exc
-
-    return message.sid
+        raise RuntimeError(f"WhatsApp send failed: {exc}") from exc
 
 
 def _build_inventory_snapshot_message(items: List[Dict[str, Any]]) -> str:

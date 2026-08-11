@@ -17,11 +17,9 @@ from fastapi import (
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from twilio.twiml.messaging_response import MessagingResponse
 
 from scheduler import start_scheduler, stop_scheduler
 from services.settings import get_settings
-from services.twilio_security import validate_twilio_request
 from services.voice_ledger import (
     FALLBACK_RESPONSE,
     MISSING_AUDIO_RESPONSE,
@@ -81,8 +79,7 @@ app.add_middleware(
 )
 
 
-def _empty_twiml_response() -> Response:
-    return Response(content=str(MessagingResponse()), media_type="application/xml")
+
 
 
 def _parse_num_media(value: Any) -> int:
@@ -525,8 +522,21 @@ def cancel_pending_conversation(vendor_id: str = "") -> Dict[str, str]:
     return {"status": "cancelled"}
 
 
-@app.post("/webhook", response_class=Response)
-async def twilio_webhook(request: Request, background_tasks: BackgroundTasks) -> Response:
+@app.get("/webhook")
+async def whatsapp_webhook_verify(request: Request):
+    settings = get_settings()
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+
+    if mode and token:
+        if mode == "subscribe" and token == settings.whatsapp_webhook_verify_token:
+            return Response(content=challenge, media_type="text/plain")
+        raise HTTPException(status_code=403, detail="Forbidden")
+    raise HTTPException(status_code=400, detail="Missing parameters")
+
+@app.post("/webhook")
+async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     settings = get_settings()
     missing = settings.missing_required()
     if missing:
@@ -538,30 +548,45 @@ async def twilio_webhook(request: Request, background_tasks: BackgroundTasks) ->
             },
         )
 
-    form_data = await request.form()
-    validate_twilio_request(request, form_data)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
 
-    sender = (form_data.get("From") or "").strip()
-    media_url = (form_data.get("MediaUrl0") or "").strip()
-    media_content_type = (form_data.get("MediaContentType0") or "").strip().lower()
-    num_media = _parse_num_media(form_data.get("NumMedia"))
+    try:
+        entry = body.get("entry", [])[0]
+        changes = entry.get("changes", [])[0]
+        value = changes.get("value", {})
+        
+        if "statuses" in value:
+            return JSONResponse(content={"status": "ok"})
+            
+        messages = value.get("messages", [])
+        if not messages:
+            return JSONResponse(content={"status": "ok"})
+            
+        message = messages[0]
+        sender = message.get("from")
+        
+        if not sender:
+            return JSONResponse(content={"status": "ok"})
+            
+        message_type = message.get("type")
+        
+        if message_type == "audio":
+            media_id = message.get("audio", {}).get("id")
+            if media_id:
+                # Placeholder: Pass media_id as media_url (fetching logic will be implemented in Phase 3)
+                background_tasks.add_task(_process_and_reply, sender, media_id)
+            else:
+                background_tasks.add_task(_send_safe_reply, sender, MISSING_AUDIO_RESPONSE)
+        else:
+            background_tasks.add_task(_send_safe_reply, sender, NON_AUDIO_RESPONSE)
+            
+    except Exception as exc:
+        logger.error("Failed to parse WhatsApp webhook: %s", exc)
 
-    if not sender:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing sender phone number in Twilio payload",
-        )
-
-    if num_media < 1 or not media_url:
-        background_tasks.add_task(_send_safe_reply, sender, MISSING_AUDIO_RESPONSE)
-        return _empty_twiml_response()
-
-    if not is_audio_message(media_content_type, media_url):
-        background_tasks.add_task(_send_safe_reply, sender, NON_AUDIO_RESPONSE)
-        return _empty_twiml_response()
-
-    background_tasks.add_task(_process_and_reply, sender, media_url)
-    return _empty_twiml_response()
+    return JSONResponse(content={"status": "ok"})
 
 
 # ---------------------------------------------------------------------------

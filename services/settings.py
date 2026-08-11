@@ -16,9 +16,10 @@ def _to_bool(value: Optional[str], default: bool = False) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    twilio_account_sid: str
-    twilio_auth_token: str
-    twilio_whatsapp_number: str
+    whatsapp_api_token: str
+    whatsapp_business_account_id: str
+    whatsapp_phone_number_id: str
+    whatsapp_webhook_verify_token: str
     groq_api_key: str
     supabase_url: str
     supabase_key: str
@@ -26,7 +27,7 @@ class Settings:
     groq_llm_model: str
     groq_whisper_model: str
     ffmpeg_binary: str
-    validate_twilio_signature: bool
+
     enable_weekly_summary: bool
     enable_weekly_summary_tts: bool
     enable_instant_stock_alerts: bool
@@ -37,9 +38,9 @@ class Settings:
     def missing_required(self) -> List[str]:
         missing: List[str] = []
         required = {
-            "TWILIO_ACCOUNT_SID": self.twilio_account_sid,
-            "TWILIO_AUTH_TOKEN": self.twilio_auth_token,
-            "TWILIO_WHATSAPP_NUMBER": self.twilio_whatsapp_number,
+            "WHATSAPP_API_TOKEN": self.whatsapp_api_token,
+            "WHATSAPP_PHONE_NUMBER_ID": self.whatsapp_phone_number_id,
+            "WHATSAPP_WEBHOOK_VERIFY_TOKEN": self.whatsapp_webhook_verify_token,
             "GROQ_API_KEY": self.groq_api_key,
             "SUPABASE_URL": self.supabase_url,
         }
@@ -54,9 +55,10 @@ class Settings:
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings(
-        twilio_account_sid=os.getenv("TWILIO_ACCOUNT_SID", ""),
-        twilio_auth_token=os.getenv("TWILIO_AUTH_TOKEN", ""),
-        twilio_whatsapp_number=os.getenv("TWILIO_WHATSAPP_NUMBER", ""),
+        whatsapp_api_token=os.getenv("WHATSAPP_API_TOKEN", ""),
+        whatsapp_business_account_id=os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", ""),
+        whatsapp_phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""),
+        whatsapp_webhook_verify_token=os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", ""),
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
         supabase_url=os.getenv("SUPABASE_URL", ""),
         supabase_key=os.getenv("SUPABASE_KEY", ""),
@@ -64,7 +66,7 @@ def get_settings() -> Settings:
         groq_llm_model=os.getenv("GROQ_LLM_MODEL", "llama-3.3-70b-versatile"),
         groq_whisper_model=os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
         ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
-        validate_twilio_signature=_to_bool(os.getenv("TWILIO_VALIDATE_SIGNATURE"), default=True),
+
         enable_weekly_summary=_to_bool(os.getenv("ENABLE_WEEKLY_SUMMARY"), default=False),
         enable_weekly_summary_tts=_to_bool(os.getenv("ENABLE_WEEKLY_SUMMARY_TTS"), default=False),
         enable_instant_stock_alerts=_to_bool(os.getenv("ENABLE_INSTANT_STOCK_ALERTS"), default=True),

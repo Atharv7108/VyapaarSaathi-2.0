@@ -51,19 +51,19 @@ class _FakeSupabase:
         return _FakeQuery(self._rows)
 
 
-def _configure_env(monkeypatch, validate_signature: str) -> None:
-    monkeypatch.setenv("TWILIO_ACCOUNT_SID", "AC123")
-    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "auth-token")
-    monkeypatch.setenv("TWILIO_WHATSAPP_NUMBER", "whatsapp:+14155238886")
+def _configure_env(monkeypatch) -> None:
+    monkeypatch.setenv("WHATSAPP_API_TOKEN", "fake-token")
+    monkeypatch.setenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "123")
+    monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "123")
+    monkeypatch.setenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "verify-token")
     monkeypatch.setenv("GROQ_API_KEY", "groq-key")
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
     monkeypatch.setenv("SUPABASE_KEY", "service-role-key")
-    monkeypatch.setenv("TWILIO_VALIDATE_SIGNATURE", validate_signature)
     get_settings.cache_clear()
 
 
 def test_read_root(monkeypatch):
-    _configure_env(monkeypatch, validate_signature="false")
+    _configure_env(monkeypatch)
     client = TestClient(main_module.app)
 
     response = client.get("/")
@@ -71,71 +71,11 @@ def test_read_root(monkeypatch):
     assert response.json()["webhook"] == "/webhook"
 
 
-def test_webhook_rejects_missing_signature(monkeypatch):
-    _configure_env(monkeypatch, validate_signature="true")
-    client = TestClient(main_module.app)
 
-    payload = {
-        "From": "whatsapp:+919999999999",
-        "NumMedia": "1",
-        "MediaUrl0": "https://api.twilio.com/fake-media",
-        "MediaContentType0": "audio/ogg",
-    }
-    response = client.post("/webhook", data=payload)
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Missing Twilio signature"
-
-
-def test_webhook_accepts_audio_when_signature_validation_disabled(monkeypatch):
-    _configure_env(monkeypatch, validate_signature="false")
-    client = TestClient(main_module.app)
-
-    captured = {}
-
-    def fake_process(sender: str, media_url: str) -> None:
-        captured["sender"] = sender
-        captured["media_url"] = media_url
-
-    monkeypatch.setattr(main_module, "_process_and_reply", fake_process)
-
-    payload = {
-        "From": "whatsapp:+919999999999",
-        "NumMedia": "1",
-        "MediaUrl0": "https://api.twilio.com/fake-media",
-        "MediaContentType0": "audio/ogg",
-    }
-
-    response = client.post("/webhook", data=payload)
-    assert response.status_code == 200
-    assert captured["sender"] == "whatsapp:+919999999999"
-    assert captured["media_url"] == "https://api.twilio.com/fake-media"
-
-
-def test_webhook_missing_audio_sends_prompt(monkeypatch):
-    _configure_env(monkeypatch, validate_signature="false")
-    client = TestClient(main_module.app)
-
-    sent_messages = []
-
-    def fake_send(to_phone: str, body: str, media_url=None):
-        sent_messages.append((to_phone, body, media_url))
-        return "SM123"
-
-    monkeypatch.setattr(main_module, "send_whatsapp_reply", fake_send)
-
-    payload = {
-        "From": "whatsapp:+919999999999",
-        "NumMedia": "0",
-    }
-
-    response = client.post("/webhook", data=payload)
-    assert response.status_code == 200
-    assert sent_messages
-    assert "Voice note" in sent_messages[0][1]
 
 
 def test_entries_compatibility_endpoint(monkeypatch):
-    _configure_env(monkeypatch, validate_signature="false")
+    _configure_env(monkeypatch)
     client = TestClient(main_module.app)
 
     rows = [

@@ -23,7 +23,7 @@ TUNNEL_PID=$!
 
 echo "All services started! (Backend + Frontend + Cloudflare Tunnel)"
 echo "Backend: http://127.0.0.1:8000 | Frontend: http://127.0.0.1:5173"
-echo "Watch terminal for Cloudflare tunnel URL (use for Twilio webhook)"
+echo "Watch terminal for Cloudflare tunnel URL (use for WhatsApp webhook)"
 echo "Press Ctrl+C to stop all."
 
 wait $BACKEND_PID $FRONTEND_PID $TUNNEL_PID
