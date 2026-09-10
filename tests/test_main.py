@@ -5,51 +5,25 @@ from fastapi.testclient import TestClient
 from services.settings import get_settings
 
 
-class _FakeResult:
-    def __init__(self, data):
-        self.data = data
-
-
-class _FakeQuery:
-    def __init__(self, rows):
-        self._rows = rows
-        self._limit = 100
-        self._phone_filter = None
-
-    def select(self, _fields):
-        return self
-
-    def order(self, _field, desc=False):
-        self._rows = sorted(
-            self._rows,
-            key=lambda row: row.get("created_at", ""),
-            reverse=bool(desc),
-        )
-        return self
-
-    def limit(self, value):
-        self._limit = int(value)
-        return self
-
-    def eq(self, field, value):
-        if field == "phone":
-            self._phone_filter = value
-        return self
-
-    def execute(self):
-        rows = self._rows
-        if self._phone_filter is not None:
-            rows = [row for row in rows if row.get("phone") == self._phone_filter]
-        return _FakeResult(rows[: self._limit])
-
-
-class _FakeSupabase:
+class _FakeCollection:
     def __init__(self, rows):
         self._rows = rows
 
-    def table(self, _name):
-        return _FakeQuery(self._rows)
+    def find(self, *args, **kwargs):
+        class _Cursor:
+            def __init__(self, rows):
+                self._rows = rows
+            def sort(self, *args, **kwargs): return self
+            def limit(self, *args, **kwargs): return self
+            def __iter__(self): return iter(self._rows)
+        return _Cursor(self._rows)
 
+class _FakeDB:
+    def __init__(self, rows):
+        self._rows = rows
+    
+    def __getitem__(self, key):
+        return _FakeCollection(self._rows)
 
 def _configure_env(monkeypatch) -> None:
     monkeypatch.setenv("WHATSAPP_API_TOKEN", "fake-token")
@@ -57,8 +31,8 @@ def _configure_env(monkeypatch) -> None:
     monkeypatch.setenv("WHATSAPP_PHONE_NUMBER_ID", "123")
     monkeypatch.setenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "verify-token")
     monkeypatch.setenv("GROQ_API_KEY", "groq-key")
-    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_KEY", "service-role-key")
+    monkeypatch.setenv("MONGODB_URI", "mongodb://localhost:27017")
+    monkeypatch.setenv("MONGODB_DB_NAME", "testdb")
     get_settings.cache_clear()
 
 
@@ -69,9 +43,6 @@ def test_read_root(monkeypatch):
     response = client.get("/")
     assert response.status_code == 200
     assert response.json()["webhook"] == "/webhook"
-
-
-
 
 
 def test_entries_compatibility_endpoint(monkeypatch):
@@ -101,7 +72,7 @@ def test_entries_compatibility_endpoint(monkeypatch):
         },
     ]
 
-    monkeypatch.setattr(main_module, "get_supabase", lambda: _FakeSupabase(rows))
+    monkeypatch.setattr(main_module, "get_db", lambda: _FakeDB(rows))
 
     response = client.get("/entries?vendor_id=whatsapp:+919999999999&limit=7")
     assert response.status_code == 200

@@ -17,7 +17,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
 
-from supabase_config import get_supabase
+from db_config import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -44,49 +44,35 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
     Manual catalog items take priority. Items only seen in voice are shown as
     "auto" items with sales history but no explicit daily_stock target.
     """
-    supabase = get_supabase()
+    db = get_db()
     today = _today()
     cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
 
     # ── Source 1: Manual catalog items ───────────────────────────────────────
-    # Try given phone first; if empty, fallback to 'web-client'
-    manual_rows = (
-        supabase.table(TABLE)
-        .select("*")
-        .eq("phone", phone)
-        .eq("stock_date", today)
-        .eq("is_active", True)
-        .order("item_name")
-        .execute()
-    ).data or []
+    manual_rows = list(db[TABLE].find({
+        "phone": phone,
+        "stock_date": today,
+        "is_active": True
+    }).sort("item_name", 1))
 
     if not manual_rows and phone != "web-client":
-        manual_rows = (
-            supabase.table(TABLE)
-            .select("*")
-            .eq("phone", "web-client")
-            .eq("stock_date", today)
-            .eq("is_active", True)
-            .order("item_name")
-            .execute()
-        ).data or []
-
+        manual_rows = list(db[TABLE].find({
+            "phone": "web-client",
+            "stock_date": today,
+            "is_active": True
+        }).sort("item_name", 1))
 
     manual_items: Dict[str, Dict[str, Any]] = {r["item_name"]: r for r in manual_rows}
 
     # ── Source 2: Voice-detected items from ledger (last 30 days) ────────────
-    ledger_query = (
-        supabase.table(LEDGER)
-        .select("category,quantity,amount,created_at")
-        .eq("type", "income")
-        .gte("created_at", cutoff_30d)
-        .order("created_at", desc=False)
-        .limit(1000)
-    )
+    query = {
+        "type": "income",
+        "created_at": {"$gte": cutoff_30d}
+    }
     if phone != "web-client":
-        ledger_query = ledger_query.eq("phone", phone)
+        query["phone"] = phone
         
-    ledger_rows = ledger_query.execute().data or []
+    ledger_rows = list(db[LEDGER].find(query).sort("created_at", 1).limit(1000))
 
     # Aggregate by item: total qty sold today, total ever, avg
     item_today_qty: Dict[str, float] = defaultdict(float)
@@ -187,20 +173,17 @@ def upsert_inventory_item(
                                 Used when creating a brand-new item.
                                 Example: new item "dhokla" → daily=50, current=50
     """
-    supabase = get_supabase()
+    db = get_db()
     today = _today()
 
     # Check if row already exists for today
-    existing = (
-        supabase.table(TABLE)
-        .select("id,current_stock,daily_stock,price_per_unit")
-        .eq("phone", phone)
-        .eq("item_name", item_name.lower().strip())
-        .eq("stock_date", today)
-        .execute()
-    )
+    existing = list(db[TABLE].find({
+        "phone": phone,
+        "item_name": item_name.lower().strip(),
+        "stock_date": today
+    }))
 
-    rows = existing.data or []
+    rows = existing
 
     if rows:
         existing_id = rows[0]["id"]
@@ -248,12 +231,8 @@ def upsert_inventory_item(
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        result = (
-            supabase.table(TABLE)
-            .update(payload)
-            .eq("id", existing_id)
-            .execute()
-        )
+        db[TABLE].update_one({"_id": existing_id}, {"$set": payload})
+        payload["id"] = str(existing_id)
     else:
         # Brand new item — daily_stock and current_stock = qty
         payload = {
@@ -268,16 +247,21 @@ def upsert_inventory_item(
             "is_active": True,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
-        result = supabase.table(TABLE).insert(payload).execute()
+        res = db[TABLE].insert_one(payload)
+        payload["id"] = str(res.inserted_id)
+        if "_id" in payload: del payload["_id"]
         logger.info("Created inventory '%s': stock=%d, price=₹%.0f", item_name, daily_stock, price_per_unit)
 
-    return (result.data or [payload])[0]
+    return payload
 
 
 def delete_inventory_item(phone: str, item_name: str) -> bool:
     """Soft-delete an inventory item (marks is_active=False for all dates)."""
-    supabase = get_supabase()
-    supabase.table(TABLE).update({"is_active": False}).eq("phone", phone).eq("item_name", item_name.lower().strip()).execute()
+    db = get_db()
+    db[TABLE].update_many(
+        {"phone": phone, "item_name": item_name.lower().strip()},
+        {"$set": {"is_active": False}}
+    )
     return True
 
 
@@ -287,40 +271,38 @@ def reset_daily_stock(phone: str) -> int:
     Called each morning (by scheduler or when vendor opens app).
     Also creates today's rows by copying yesterday's catalog if needed.
     """
-    supabase = get_supabase()
+    db = get_db()
     today = _today()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
 
     # Check if today's rows already exist
-    today_check = (
-        supabase.table(TABLE)
-        .select("id")
-        .eq("phone", phone)
-        .eq("stock_date", today)
-        .eq("is_active", True)
-        .execute()
-    )
+    today_check = list(db[TABLE].find({
+        "phone": phone,
+        "stock_date": today,
+        "is_active": True
+    }, {"_id": 1}))
 
-    if today_check.data:
+    if today_check:
         # Today exists — just reset current_stock = daily_stock
-        supabase.table(TABLE).update({
-            "current_stock": supabase.table(TABLE).select("daily_stock"),  # not valid inline
-        })
-        # Fetch all today's rows and reset individually
-        rows = supabase.table(TABLE).select("id,daily_stock").eq("phone", phone).eq("stock_date", today).eq("is_active", True).execute().data or []
+        rows = list(db[TABLE].find({
+            "phone": phone,
+            "stock_date": today,
+            "is_active": True
+        }, {"_id": 1, "daily_stock": 1}))
+        
         for row in rows:
-            supabase.table(TABLE).update({"current_stock": row["daily_stock"], "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", row["id"]).execute()
+            db[TABLE].update_one(
+                {"_id": row["_id"]},
+                {"$set": {"current_stock": row.get("daily_stock", 0), "updated_at": datetime.now(timezone.utc).isoformat()}}
+            )
         return len(rows)
 
     # Today's rows don't exist — copy from yesterday's catalog
-    yesterday_rows = (
-        supabase.table(TABLE)
-        .select("*")
-        .eq("phone", phone)
-        .eq("stock_date", yesterday)
-        .eq("is_active", True)
-        .execute()
-    ).data or []
+    yesterday_rows = list(db[TABLE].find({
+        "phone": phone,
+        "stock_date": yesterday,
+        "is_active": True
+    }))
 
     if not yesterday_rows:
         return 0
@@ -331,16 +313,16 @@ def reset_daily_stock(phone: str) -> int:
             "phone": phone,
             "item_name": row["item_name"],
             "item_name_hi": row.get("item_name_hi", row["item_name"]),
-            "unit": row["unit"],
-            "daily_stock": row["daily_stock"],
-            "current_stock": row["daily_stock"],  # Fresh day — full stock
+            "unit": row.get("unit", "piece"),
+            "daily_stock": row.get("daily_stock", 0),
+            "current_stock": row.get("daily_stock", 0),  # Fresh day — full stock
             "price_per_unit": row.get("price_per_unit", 0),
             "stock_date": today,
             "is_active": True,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
 
-    supabase.table(TABLE).insert(new_rows).execute()
+    db[TABLE].insert_many(new_rows)
     return len(new_rows)
 
 
@@ -358,7 +340,7 @@ def deduct_stock(phone: str, item_name: str, quantity: float) -> Optional[Dict[s
     if quantity <= 0:
         return None
 
-    supabase = get_supabase()
+    db = get_db()
     today = _today()
     item_key = item_name.lower().strip()
 
@@ -369,14 +351,11 @@ def deduct_stock(phone: str, item_name: str, quantity: float) -> Optional[Dict[s
 
     rows = []
     for try_phone in phones_to_try:
-        rows = (
-            supabase.table(TABLE)
-            .select("id,item_name,current_stock,daily_stock,unit")
-            .eq("phone", try_phone)
-            .eq("stock_date", today)
-            .eq("is_active", True)
-            .execute()
-        ).data or []
+        rows = list(db[TABLE].find({
+            "phone": try_phone,
+            "stock_date": today,
+            "is_active": True
+        }))
         if rows:
             break
 
@@ -401,17 +380,13 @@ def deduct_stock(phone: str, item_name: str, quantity: float) -> Optional[Dict[s
 
 
     new_stock = max(0, int(matched["current_stock"]) - int(quantity))
-    updated = (
-        supabase.table(TABLE)
-        .update({"current_stock": new_stock, "updated_at": datetime.now(timezone.utc).isoformat()})
-        .eq("id", matched["id"])
-        .execute()
+    db[TABLE].update_one(
+        {"_id": matched["_id"]},
+        {"$set": {"current_stock": new_stock, "updated_at": datetime.now(timezone.utc).isoformat()}}
     )
-    # PostgREST update responses may include only changed columns.
-    # Merge with matched row to always preserve daily_stock/unit/item_name for alert logic.
+
     row = dict(matched)
-    if updated.data:
-        row.update(updated.data[0])
+    if "_id" in row: row["id"] = str(row.pop("_id"))
     row["current_stock"] = new_stock
     stockout = new_stock == 0
     logger.info(
@@ -432,21 +407,15 @@ def get_item_stats_from_ledger(phone: str, days: int = 14) -> List[Dict[str, Any
     This pulls rows where quantity IS NOT NULL (i.e., vendor mentioned a count)
     and builds the `item_stats` schema required by the AI suggestion prompt.
     """
-    supabase = get_supabase()
+    db = get_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
-    result = (
-        supabase.table(LEDGER)
-        .select("category,quantity,amount,created_at")
-        .eq("phone", phone)
-        .eq("type", "income")
-        .gte("created_at", cutoff)
-        .not_.is_("quantity", "null")
-        .order("created_at", desc=False)
-        .limit(1000)
-        .execute()
-    )
-    rows = result.data or []
+    rows = list(db[LEDGER].find({
+        "phone": phone,
+        "type": "income",
+        "created_at": {"$gte": cutoff},
+        "quantity": {"$exists": True, "$ne": None}
+    }).sort("created_at", 1).limit(1000))
 
     if not rows:
         return []  # Caller falls back to amount-based heuristic

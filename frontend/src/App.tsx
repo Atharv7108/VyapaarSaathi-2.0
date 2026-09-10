@@ -1,6 +1,11 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useStore } from "./store/useStore";
+import AuthGuard from "./components/AuthGuard";
 import Layout from "./components/Layout";
+import Landing from "./pages/Landing";
+import Login from "./pages/Login";
+import AdminLogin from "./pages/AdminLogin";
+import AdminDashboard from "./pages/AdminDashboard";
 import Home from "./pages/Home";
 import Ledger from "./pages/Ledger";
 import Record from "./pages/Record";
@@ -15,25 +20,51 @@ export default function App() {
   return (
     <BrowserRouter basename={import.meta.env.BASE_URL}>
       <Routes>
-        {/* Onboarding Route */}
-        <Route 
-          path="/onboarding" 
-          element={hasOnboarded ? <Navigate to="/" replace /> : <Onboarding />} 
+        {/* ── Public ──────────────────────────────────────────────────────── */}
+        <Route path="/" element={<Landing />} />
+        <Route path="/login" element={<Login />} />
+        <Route path="/admin/login" element={<AdminLogin />} />
+
+        {/* ── Vendor Onboarding (kept inside auth guard) ─────────────────── */}
+        <Route
+          path="/onboarding"
+          element={
+            <AuthGuard role="vendor">
+              {hasOnboarded ? <Navigate to="/app" replace /> : <Onboarding />}
+            </AuthGuard>
+          }
         />
-        
-        {/* Main Dashboard Layout */}
-        <Route 
-          path="/" 
-          element={hasOnboarded ? <Layout /> : <Navigate to="/onboarding" replace />}
+
+        {/* ── Vendor Dashboard ─────────────────────────────────────────────── */}
+        <Route
+          path="/app"
+          element={
+            <AuthGuard role="vendor">
+              {hasOnboarded ? <Layout /> : <Navigate to="/onboarding" replace />}
+            </AuthGuard>
+          }
         >
           <Route index element={<Home />} />
-          <Route path="ledger" element={<Ledger />} />
-          <Route path="record" element={<Record />} />
-          <Route path="insights" element={<Insights />} />
+          <Route path="ledger"    element={<Ledger />} />
+          <Route path="record"    element={<Record />} />
+          <Route path="insights"  element={<Insights />} />
           <Route path="inventory" element={<Inventory />} />
-          <Route path="profile" element={<Profile />} />
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="profile"   element={<Profile />} />
+          <Route path="*"         element={<Navigate to="/app" replace />} />
         </Route>
+
+        {/* ── Admin Dashboard ──────────────────────────────────────────────── */}
+        <Route
+          path="/admin"
+          element={
+            <AuthGuard role="admin">
+              <AdminDashboard />
+            </AuthGuard>
+          }
+        />
+
+        {/* ── Fallback ─────────────────────────────────────────────────────── */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </BrowserRouter>
   );

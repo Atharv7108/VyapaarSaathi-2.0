@@ -13,10 +13,12 @@ from fastapi import (
     Request,
     UploadFile,
     status,
+    Query,
 )
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 from scheduler import start_scheduler, stop_scheduler
 from services.settings import get_settings
@@ -32,10 +34,24 @@ from services.voice_ledger import (
     save_to_db,
     transcribe_audio,
 )
-from supabase_config import get_supabase
+from db_config import get_db
 from services.stock_suggestions import aggregate_item_stats, call_groq_for_suggestions
 from services.ai_insights import run_insights_pipeline
 from services.conversation_engine import analyze_voice_input, process_follow_up_answer, has_pending, cancel_pending
+from services.vendor_manager import (
+    get_or_create_vendor,
+    update_last_active,
+    set_vendor_name,
+    set_vendor_state,
+    update_vendor_onboarding,
+    extract_name_from_text,
+    list_vendors,
+    WELCOME_MESSAGE,
+    NAME_SAVED_TEMPLATE,
+    STATE_NEW,
+    STATE_AWAITING_NAME,
+    STATE_ACTIVE,
+)
 from services.inventory import (
     get_inventory,
     upsert_inventory_item,
@@ -64,11 +80,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="VyapaarSaathi WhatsApp Ledger API",
-    description="FastAPI backend for Twilio WhatsApp voice ledger ingestion.",
-    version="2.0.0",
+    title="VyapaarSaathi",
+    description="Multi-Vendor WhatsApp Ledger Backend",
+    version="1.0.0",
     lifespan=lifespan,
 )
+
+import os
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,18 +116,74 @@ def _send_safe_reply(to_phone: str, body: str) -> None:
         logger.error("Failed to send WhatsApp reply: %s", exc)
 
 
-def _process_and_reply(sender: str, media_url: str) -> None:
+def _process_and_reply(sender: str, media_id: str) -> None:
+    """Process a voice message with vendor onboarding check."""
+    # --- Vendor onboarding gate ---
     try:
-        reply_body = process_voice_message(sender, media_url)
+        vendor = get_or_create_vendor(sender)
+        update_last_active(sender)
+        state = vendor.get("state", STATE_ACTIVE)
+
+        if state == STATE_NEW:
+            # First message ever — send welcome and ask for name
+            set_vendor_state(sender, STATE_AWAITING_NAME)
+            _send_safe_reply(sender, WELCOME_MESSAGE)
+            return
+
+        if state == STATE_AWAITING_NAME:
+            # They sent a voice note instead of their name — gently remind them
+            _send_safe_reply(
+                sender,
+                "🙏 Pehle apna naam text mein bhejein (jaise: \"Mera naam Ramesh hai\"). "
+                "Naam ke baad aap voice entries shuru kar sakte hain!"
+            )
+            return
+    except Exception as exc:
+        logger.warning("Vendor onboarding check failed, continuing: %s", exc)
+
+    # --- Normal voice processing ---
+    try:
+        reply_body = process_voice_message(sender, media_id)
     except Exception as exc:  # pragma: no cover - external API path
         import traceback
         with open("/tmp/webhook_err.log", "w") as f:
             f.write(traceback.format_exc())
-            f.write(f"\nMediaUrl: {media_url}\n")
+            f.write(f"\nMediaId: {media_id}\n")
         logger.exception("Voice message pipeline failed: %s", exc)
         reply_body = FALLBACK_RESPONSE
 
     _send_safe_reply(sender, reply_body)
+
+
+def _handle_text_message(sender: str, text: str) -> None:
+    """Handle an incoming plain-text message (used for onboarding name capture)."""
+    try:
+        vendor = get_or_create_vendor(sender)
+        update_last_active(sender)
+        state = vendor.get("state", STATE_ACTIVE)
+
+        if state in (STATE_NEW, STATE_AWAITING_NAME):
+            name = extract_name_from_text(text)
+            if name:
+                set_vendor_name(sender, name)
+                reply = NAME_SAVED_TEMPLATE.format(name=name)
+            else:
+                set_vendor_state(sender, STATE_AWAITING_NAME)
+                reply = (
+                    "🙏 Kripya apna naam batayein, jaise:\n"
+                    "• _\"Mera naam Ramesh hai\"_\n"
+                    "• _\"Suresh\"_"
+                )
+            _send_safe_reply(sender, reply)
+            return
+    except Exception as exc:
+        logger.warning("Text onboarding handler failed: %s", exc)
+
+    # Vendor is active — text messages aren't supported for entries
+    _send_safe_reply(
+        sender,
+        "🎤 Voice message bhejein apni entry ke liye! (Text messages supported nahi hain)"
+    )
 
 
 def _is_phone_identifier(value: str) -> bool:
@@ -193,6 +269,131 @@ def health_check() -> Dict[str, Any]:
     }
 
 
+@app.get("/webhook")
+def verify_webhook(
+    hub_mode: str = Query(None, alias="hub.mode"),
+    hub_challenge: str = Query(None, alias="hub.challenge"),
+    hub_verify_token: str = Query(None, alias="hub.verify_token"),
+):
+    """Meta Webhook verification endpoint."""
+    settings = get_settings()
+    if hub_mode == "subscribe" and hub_verify_token == settings.whatsapp_webhook_verify_token:
+        logger.info("Meta Webhook verified successfully.")
+        return int(hub_challenge) if hub_challenge and hub_challenge.isdigit() else Response(content=hub_challenge)
+    raise HTTPException(status_code=403, detail="Verification failed")
+
+
+@app.post("/webhook")
+async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
+    """Receive messages from Meta WhatsApp Webhook."""
+    try:
+        body = await request.json()
+        import json
+        with open("/tmp/last_webhook.json", "w") as f:
+            json.dump(body, f, indent=2)
+            
+        if body.get("object") != "whatsapp_business_account":
+            return Response(status_code=404)
+            
+        for entry in body.get("entry", []):
+            for change in entry.get("changes", []):
+                value = change.get("value", {})
+                
+                messages = value.get("messages", [])
+                if not messages:
+                    continue
+                    
+                msg = messages[0]
+                sender = f"whatsapp:+{msg.get('from')}"
+                
+                msg_type = msg.get("type")
+                # Voice/audio message — main use case
+                if msg_type == "audio":
+                    media_id = msg.get("audio", {}).get("id")
+                    if media_id:
+                        background_tasks.add_task(_process_and_reply, sender, str(media_id))
+                # Plain text — used for onboarding name capture
+                elif msg_type == "text":
+                    text_body = msg.get("text", {}).get("body", "").strip()
+                    background_tasks.add_task(_handle_text_message, sender, text_body)
+                else:
+                    # Stickers, images, etc. — not supported
+                    background_tasks.add_task(_send_safe_reply, sender, NON_AUDIO_RESPONSE)
+                    
+        return Response(content="EVENT_RECEIVED", status_code=200)
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        return Response(status_code=500)
+
+
+# ---------------------------------------------------------------------------
+# Auth Endpoints (Web Client)
+# ---------------------------------------------------------------------------
+import random
+otp_store = {}  # simple memory store: phone -> otp
+
+class OTPRequest(BaseModel):
+    phone: str
+
+class OTPVerify(BaseModel):
+    phone: str
+    otp: str
+
+class OnboardRequest(BaseModel):
+    phone: str
+    name: str
+    vendor_type: str
+    language: str
+    pin: str
+
+@app.post("/auth/request-otp")
+def request_otp(data: OTPRequest):
+    phone = data.phone.strip()
+    if not phone:
+        raise HTTPException(400, "Phone required")
+    # Generate OTP
+    otp = str(random.randint(1000, 9999))
+    otp_store[phone] = otp
+    # For development, we print to console. Universal bypass "1234" is also supported.
+    print(f"====== OTP FOR {phone} IS {otp} ======")
+    return {"message": "OTP sent successfully (check console)"}
+
+@app.post("/auth/verify-otp")
+def verify_otp(data: OTPVerify):
+    phone = data.phone.strip()
+    otp = data.otp.strip()
+    if otp != "1234" and otp_store.get(phone) != otp:
+        raise HTTPException(400, "Invalid OTP")
+    
+    # Check vendor status
+    vendor = get_or_create_vendor(phone)
+    return {
+        "status": "success",
+        "vendor": {
+            "phone": vendor.get("phone"),
+            "state": vendor.get("state"),
+            "name": vendor.get("name"),
+            "language": vendor.get("language", "hi")
+        }
+    }
+
+@app.post("/auth/onboard")
+def onboard_vendor(data: OnboardRequest):
+    phone = data.phone.strip()
+    update_vendor_onboarding(phone, data.name, data.vendor_type, data.language, data.pin)
+    return {"status": "success", "message": "Onboarding complete"}
+
+
+@app.get("/admin/vendors")
+def admin_list_vendors(limit: int = 100) -> Dict[str, Any]:
+    """
+    Admin endpoint: list all registered vendors with their entry counts.
+    Returns vendors sorted by most recently registered.
+    """
+    vendors = list_vendors(limit=limit)
+    return {"total": len(vendors), "vendors": vendors}
+
+
 @app.get("/entries")
 def get_entries(vendor_id: str = "", limit: int = 100) -> Dict[str, Any]:
     """
@@ -200,27 +401,23 @@ def get_entries(vendor_id: str = "", limit: int = 100) -> Dict[str, Any]:
     Reads data from the `ledger` table and shapes it like legacy daily entries.
     """
     safe_limit = max(1, min(limit, 1000))
-    supabase = get_supabase()
+    db = get_db()
 
     try:
-        query = (
-            supabase.table("ledger")
-            .select("id,phone,amount,type,category,description,audio_url,created_at")
-            .order("created_at", desc=True)
-            .limit(safe_limit)
-        )
-
+        query = {}
         incoming_identifier = (vendor_id or "").strip()
         if _is_phone_identifier(incoming_identifier):
             normalized = incoming_identifier
             if not normalized.startswith("whatsapp:"):
                 normalized = f"whatsapp:{normalized}"
-            query = query.eq("phone", normalized)
-        # When accessed from the web frontend (UUID vendor_id), show ALL entries
-        # (web-client + whatsapp) so the ledger is a complete view of the business.
-
-        result = query.execute()
-        entries = [_legacy_entry_from_ledger(row) for row in (result.data or [])]
+            query["phone"] = normalized
+            
+        rows = list(db["ledger"].find(query).sort("created_at", -1).limit(safe_limit))
+        for row in rows:
+            if "_id" in row:
+                row["id"] = str(row.pop("_id"))
+                
+        entries = [_legacy_entry_from_ledger(row) for row in rows]
         return {"entries": entries}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to load entries: {exc}")
@@ -321,13 +518,16 @@ async def record_voice_entry(
                         new_price = 0.0
                     if cat and new_price > 0:
                         try:
-                            supabase = get_supabase()
+                            db = get_db()
                             from datetime import date
                             today = date.today().isoformat()
-                            supabase.table("inventory").update({
-                                "price_per_unit": new_price,
-                                "updated_at": datetime.now(timezone.utc).isoformat(),
-                            }).eq("phone", phone_identifier).eq("item_name", cat).eq("stock_date", today).execute()
+                            db["inventory"].update_one(
+                                {"phone": phone_identifier, "item_name": cat, "stock_date": today},
+                                {"$set": {
+                                    "price_per_unit": new_price,
+                                    "updated_at": datetime.now(timezone.utc).isoformat()
+                                }}
+                            )
                             inventory_updates.append({"action": "price_updated", "item": cat, "new_price": new_price})
                         except Exception as inv_exc:
                             logger.warning("PRICE_UPDATE failed for '%s': %s", cat, inv_exc)
@@ -383,12 +583,11 @@ async def record_voice_entry(
     except Exception as exc:
         logger.exception("/record upload failed: %s", exc)
         message = str(exc).lower()
-        if "row-level security policy" in message or "code': '42501" in message:
+        if "duplicate key" in message or "code': '42501" in message:
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    "Supabase insert blocked by RLS. Configure SUPABASE_SERVICE_ROLE_KEY in backend .env "
-                    "or add an INSERT policy for table ledger."
+                    "Database insert failed."
                 ),
             )
         raise HTTPException(status_code=500, detail=f"Record failed: {exc}")
@@ -597,24 +796,16 @@ def get_insights(vendor_id: str = "", refresh: bool = False) -> Dict[str, Any]:
     """
     Analyse ledger entries for the given vendor and return patterns, alerts, and metrics.
     """
-    supabase = get_supabase()
+    db = get_db()
 
     try:
-        query = (
-            supabase.table("ledger")
-            .select("id,phone,amount,type,category,description,created_at")
-            .order("created_at", desc=True)
-            .limit(100)
-        )
-
+        query = {}
         incoming = (vendor_id or "").strip()
         if _is_phone_identifier(incoming):
             normalized = incoming if incoming.startswith("whatsapp:") else f"whatsapp:{incoming}"
-            query = query.eq("phone", normalized)
-        # UUID / web frontend: no phone filter → show all entries
+            query["phone"] = normalized
 
-        result = query.execute()
-        rows = result.data or []
+        rows = list(db["ledger"].find(query).sort("created_at", -1).limit(100))
 
         # ---------- compute patterns, metrics, alerts ----------
         total_income = 0.0
@@ -827,28 +1018,22 @@ def get_suggestions(
     Falls back to a simple 15% heuristic if the AI call fails.
     """
     settings = get_settings()
-    supabase = get_supabase()
+    db = get_db()
 
     try:
         # Fetch recent income ledger rows
         safe_days = max(7, min(days, 30))
         cutoff = (datetime.now(timezone.utc) - timedelta(days=safe_days)).isoformat()
-        query = (
-            supabase.table("ledger")
-            .select("id,phone,amount,type,category,description,created_at")
-            .eq("type", "income")
-            .gte("created_at", cutoff)
-            .order("created_at", desc=True)
-            .limit(500)
-        )
-
+        
+        query = {"type": "income", "created_at": {"$gte": cutoff}}
         incoming = (vendor_id or "").strip()
+        phone_key = "web-client"
         if _is_phone_identifier(incoming):
             normalized = incoming if incoming.startswith("whatsapp:") else f"whatsapp:{incoming}"
-            query = query.eq("phone", normalized)
+            query["phone"] = normalized
+            phone_key = normalized
 
-        result = query.execute()
-        rows = result.data or []
+        rows = list(db["ledger"].find(query).sort("created_at", -1).limit(500))
 
         # --- Try real quantity data first ---
         item_stats = get_item_stats_from_ledger(phone_key, days=safe_days)
@@ -891,26 +1076,18 @@ def get_ai_insights(
     and a base64-encoded MP3 audio of the summary.
     """
     settings = get_settings()
-    supabase = get_supabase()
-
+    
     try:
-        # Fetch ledger entries (last 30 days)
+        db = get_db()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        query = (
-            supabase.table("ledger")
-            .select("id,phone,amount,type,category,description,created_at")
-            .gte("created_at", cutoff)
-            .order("created_at", desc=True)
-            .limit(500)
-        )
-
+        
+        query = {"created_at": {"$gte": cutoff}}
         incoming = (vendor_id or "").strip()
         if _is_phone_identifier(incoming):
             normalized = incoming if incoming.startswith("whatsapp:") else f"whatsapp:{incoming}"
-            query = query.eq("phone", normalized)
+            query["phone"] = normalized
 
-        result = query.execute()
-        ledger_rows = result.data or []
+        ledger_rows = list(db["ledger"].find(query).sort("created_at", -1).limit(500))
 
         # Fetch inventory items
         phone_key = "web-client"

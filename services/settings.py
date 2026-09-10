@@ -21,9 +21,8 @@ class Settings:
     whatsapp_phone_number_id: str
     whatsapp_webhook_verify_token: str
     groq_api_key: str
-    supabase_url: str
-    supabase_key: str
-    supabase_service_role_key: str
+    mongodb_uri: str
+    mongodb_db_name: str
     groq_llm_model: str
     groq_whisper_model: str
     ffmpeg_binary: str
@@ -42,13 +41,13 @@ class Settings:
             "WHATSAPP_PHONE_NUMBER_ID": self.whatsapp_phone_number_id,
             "WHATSAPP_WEBHOOK_VERIFY_TOKEN": self.whatsapp_webhook_verify_token,
             "GROQ_API_KEY": self.groq_api_key,
-            "SUPABASE_URL": self.supabase_url,
+            "MONGODB_URI": self.mongodb_uri,
+            "MONGODB_DB_NAME": self.mongodb_db_name,
         }
         for key, value in required.items():
             if not value:
                 missing.append(key)
-        if not (self.supabase_service_role_key or self.supabase_key):
-            missing.append("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY")
+
         return missing
 
 
@@ -60,10 +59,9 @@ def get_settings() -> Settings:
         whatsapp_phone_number_id=os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""),
         whatsapp_webhook_verify_token=os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", ""),
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
-        supabase_url=os.getenv("SUPABASE_URL", ""),
-        supabase_key=os.getenv("SUPABASE_KEY", ""),
-        supabase_service_role_key=os.getenv("SUPABASE_SERVICE_ROLE_KEY", ""),
-        groq_llm_model=os.getenv("GROQ_LLM_MODEL", "llama-3.3-70b-versatile"),
+        mongodb_uri=os.getenv("MONGODB_URI", ""),
+        mongodb_db_name=os.getenv("MONGODB_DB_NAME", "vyapaarsaathi"),
+        groq_llm_model=os.getenv("GROQ_LLM_MODEL", "groq/compound-mini"),
         groq_whisper_model=os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
         ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
 

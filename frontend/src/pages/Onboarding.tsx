@@ -24,10 +24,39 @@ export default function Onboarding() {
   const tBtn = "bg-white hover:bg-slate-50 border border-slate-200 text-slate-800";
   const tBtnActive = "bg-slate-900/20 border border-indigo-500 text-slate-400";
 
-  const handleFinish = () => {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleFinish = async () => {
     if (!userName.trim() || pin.length < 4) return;
-    setHasOnboarded(true);
-    navigate("/");
+    setLoading(true);
+    setError("");
+    
+    try {
+      const { vendorId } = useStore.getState();
+      const API_BASE = import.meta.env.VITE_API_URL || "";
+      
+      const res = await fetch(`${API_BASE}/auth/onboard`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          phone: vendorId,
+          name: userName,
+          vendor_type: vendorType,
+          language: language,
+          pin: pin
+        }),
+      });
+
+      if (!res.ok) throw new Error("Failed to save profile");
+      
+      setHasOnboarded(true);
+      navigate("/app", { replace: true });
+    } catch (err) {
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const isHindi = language === "hi";
@@ -184,11 +213,12 @@ export default function Onboarding() {
 
             <button 
               onClick={handleFinish}
-              disabled={!userName.trim() || pin.length < 4}
+              disabled={loading || !userName.trim() || pin.length < 4}
               className="mt-6 w-full rounded-2xl bg-sky-500 py-4 text-sm font-bold text-white shadow-lg transition hover:bg-sky-600 disabled:opacity-50 disabled:hover:bg-sky-500"
             >
-              {isHindi ? "सहेजें और शुरू करें" : "Save & Open Ledger"}
+              {loading ? (isHindi ? "सहेज रहा है..." : "Saving...") : (isHindi ? "सहेजें और शुरू करें" : "Save & Open Ledger")}
             </button>
+            {error && <p className="mt-4 text-xs text-center text-red-500 font-medium">⚠️ {error}</p>}
           </div>
         )}
       </div>

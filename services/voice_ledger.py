@@ -15,7 +15,7 @@ import requests
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from services.settings import get_settings
-from supabase_config import get_supabase
+from db_config import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -135,12 +135,27 @@ def is_audio_message(media_content_type: str, media_url: str) -> bool:
     return media_path.endswith(SUPPORTED_AUDIO_EXTENSIONS)
 
 
-def download_audio(media_url: str, destination_dir: Path) -> Path:
+def download_audio(media_id: str, destination_dir: Path) -> Path:
     settings = get_settings()
     destination_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Meta Graph API requires a 2-step download process for media:
+    # 1. Fetch the media URL using the media ID
+    media_info_url = f"https://graph.facebook.com/v19.0/{media_id}"
+    info_resp = requests.get(
+        media_info_url,
+        headers={"Authorization": f"Bearer {settings.whatsapp_api_token}"},
+        timeout=15,
+    )
+    info_resp.raise_for_status()
+    actual_url = info_resp.json().get("url")
+    
+    if not actual_url:
+        raise RuntimeError(f"Could not retrieve media URL from Meta for ID {media_id}")
 
+    # 2. Download the binary audio data
     response = requests.get(
-        media_url,
+        actual_url,
         headers={"Authorization": f"Bearer {settings.whatsapp_api_token}"},
         timeout=45,
     )
@@ -150,7 +165,7 @@ def download_audio(media_url: str, destination_dir: Path) -> Path:
     except requests.HTTPError as exc:
         raise RuntimeError(f"Unable to download WhatsApp media: {exc}") from exc
 
-    extension = _guess_extension(response.headers.get("Content-Type", ""), media_url)
+    extension = _guess_extension(response.headers.get("Content-Type", ""), actual_url)
     audio_path = destination_dir / f"incoming{extension}"
     audio_path.write_bytes(response.content)
     return audio_path
@@ -353,16 +368,11 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
 
 
 def _calculate_current_profit(phone: str) -> float:
-    supabase = get_supabase()
-    result = (
-        supabase.table("ledger")
-        .select("amount,type")
-        .eq("phone", phone)
-        .execute()
-    )
+    db = get_db()
+    rows = list(db["ledger"].find({"phone": phone}, {"amount": 1, "type": 1, "_id": 0}))
 
     profit = 0.0
-    for row in result.data or []:
+    for row in rows:
         try:
             amount = float(row.get("amount") or 0)
         except (TypeError, ValueError):
@@ -381,7 +391,7 @@ def save_to_db(phone: str, extracted_data: Dict[str, Any], audio_url: str, catal
     """Save a single extracted entry. extracted_data is a single entry dict.
     catalog_phone: the phone key used for inventory lookups (defaults to phone if not given).
     Pass 'web-client' to make WhatsApp entries use the shared web-client catalog."""
-    supabase = get_supabase()
+    db = get_db()
     # Use catalog_phone for inventory if provided, else fall back to phone
     inv_phone = catalog_phone if catalog_phone else phone
 
@@ -438,8 +448,11 @@ def save_to_db(phone: str, extracted_data: Dict[str, Any], audio_url: str, catal
         record["quantity"] = quantity
 
 
-    insert_result = supabase.table("ledger").insert(record).execute()
-    inserted = (insert_result.data or [record])[0]
+    insert_result = db["ledger"].insert_one(record)
+    record["id"] = str(insert_result.inserted_id)
+    if "_id" in record:
+        del record["_id"]
+    inserted = record
     current_profit = _calculate_current_profit(phone)
 
     # Auto-deduct from inventory for ALL income entries
@@ -703,19 +716,14 @@ def _recent_whatsapp_recipients(days: int = 30) -> List[str]:
             recipients.append(normalized)
         return recipients
 
-    supabase = get_supabase()
+    db = get_db()
     since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
     try:
-        rows = (
-            supabase.table("ledger")
-            .select("phone,created_at")
-            .like("phone", "whatsapp:%")
-            .gte("created_at", since)
-            .order("created_at", desc=True)
-            .limit(300)
-            .execute()
-        ).data or []
+        rows = list(db["ledger"].find(
+            {"phone": {"$regex": "^whatsapp:"}, "created_at": {"$gte": since}},
+            {"phone": 1, "created_at": 1}
+        ).sort("created_at", -1).limit(300))
     except Exception as exc:  # pragma: no cover - network/db path
         logger.warning("Failed to load WhatsApp recipients for stock alerts: %s", exc)
         return []
@@ -744,21 +752,17 @@ def run_instant_stock_alert_job() -> int:
         logger.info("Instant stock alert job: no recent WhatsApp recipients found.")
         return 0
 
-    supabase = get_supabase()
+    db = get_db()
     today = date.today().isoformat()
     units_threshold = settings.instant_stock_alert_units_threshold
 
     try:
-        rows = (
-            supabase.table("inventory")
-            .select("item_name,item_name_hi,current_stock,daily_stock,unit,stock_date,phone")
-            .eq("stock_date", today)
-            .eq("is_active", True)
-            .eq("phone", "web-client")
-            .order("item_name")
-            .limit(1000)
-            .execute()
-        ).data or []
+        query = {
+            "stock_date": today,
+            "is_active": True,
+            "phone": "web-client"
+        }
+        rows = list(db["inventory"].find(query).sort("item_name", 1).limit(1000))
     except Exception as exc:  # pragma: no cover - network/db path
         logger.warning("Instant stock alert job failed to fetch inventory: %s", exc)
         return 0
@@ -878,7 +882,7 @@ def _looks_like_inventory_request(transcript: str) -> bool:
     return has_request and not has_update_or_transaction
 
 
-def process_voice_message(phone: str, media_url: str) -> str:
+def process_voice_message(phone: str, media_id: str) -> str:
     from services.conversation_engine import (
         analyze_voice_input, process_follow_up_answer, has_pending, get_pending,
     )
@@ -887,7 +891,7 @@ def process_voice_message(phone: str, media_url: str) -> str:
 
     with tempfile.TemporaryDirectory(prefix="vyapaarsaathi-wa-") as tmp_dir:
         working_dir = Path(tmp_dir)
-        raw_audio = download_audio(media_url, working_dir)
+        raw_audio = download_audio(media_id, working_dir)
         mp3_audio = convert_audio(raw_audio, working_dir)
         transcript_payload = transcribe_audio(mp3_audio)
 
@@ -1030,11 +1034,14 @@ def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, c
                 new_price = 0.0
             if cat and new_price > 0:
                 try:
-                    _sb = get_supabase()
-                    _sb.table("inventory").update({
-                        "price_per_unit": new_price,
-                        "updated_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("phone", catalog_phone).eq("item_name", cat).eq("stock_date", date.today().isoformat()).execute()
+                    db = get_db()
+                    db["inventory"].update_one(
+                        {"phone": catalog_phone, "item_name": cat, "stock_date": date.today().isoformat()},
+                        {"$set": {
+                            "price_per_unit": new_price,
+                            "updated_at": datetime.now(timezone.utc).isoformat()
+                        }}
+                    )
                     inventory_confirmations.append(f"💰 {cat} rate → ₹{new_price:.0f}")
                 except Exception as inv_exc:
                     logger.warning("PRICE_UPDATE failed '%s': %s", cat, inv_exc)
@@ -1132,37 +1139,38 @@ def _generate_tts_file(summary_text: str, destination_dir: Path) -> Optional[Pat
 
 
 def _upload_weekly_audio(tts_path: Path, phone: str) -> Optional[str]:
-    supabase = get_supabase()
     safe_phone = phone.replace("whatsapp:", "").replace("+", "")
-    storage_path = f"{safe_phone}/{uuid.uuid4()}.mp3"
-
+    import shutil
+    import os
+    
+    # Ensure directory exists
+    target_dir = Path("static/weekly_summaries") / safe_phone
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    file_name = f"{uuid.uuid4()}.mp3"
+    target_path = target_dir / file_name
+    
     try:
-        with tts_path.open("rb") as source:
-            supabase.storage.from_("weekly_summaries").upload(
-                storage_path,
-                source.read(),
-                {"content-type": "audio/mpeg"},
-            )
-        return supabase.storage.from_("weekly_summaries").get_public_url(storage_path)
-    except Exception as exc:  # pragma: no cover - network/storage path
+        shutil.copy2(tts_path, target_path)
+        # Assuming app is running and /static is mounted
+        return f"/static/weekly_summaries/{safe_phone}/{file_name}"
+    except Exception as exc:  # pragma: no cover
         logger.warning("Weekly summary upload failed: %s", exc)
         return None
 
 
 def run_weekly_summary_job() -> int:
     settings = get_settings()
-    supabase = get_supabase()
+    db = get_db()
 
-    start_time = datetime.now(timezone.utc) - timedelta(days=7)
-    result = (
-        supabase.table("ledger")
-        .select("phone,amount,type")
-        .gte("created_at", start_time.isoformat())
-        .execute()
-    )
+    start_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    rows = list(db["ledger"].find(
+        {"created_at": {"$gte": start_time}}, 
+        {"phone": 1, "amount": 1, "type": 1}
+    ))
 
     aggregates: Dict[str, Dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expense": 0.0})
-    for row in result.data or []:
+    for row in rows:
         phone = row.get("phone")
         if not phone:
             continue

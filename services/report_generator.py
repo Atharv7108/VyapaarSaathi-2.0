@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fpdf import FPDF
 
-from supabase_config import get_supabase
+from db_config import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ def _fetch_all_data(phone: str) -> Dict[str, Any]:
     Returns a dict with structured financial data for the P&L statement.
     Uses last 30 days to match the AI Insights date window exactly.
     """
-    supabase = get_supabase()
+    db = get_db()
     today = datetime.now(timezone.utc)
     # Use same 30-day window as AI Insights so numbers always match
     start_30d = today - timedelta(days=30)
@@ -79,41 +79,25 @@ def _fetch_all_data(phone: str) -> Dict[str, Any]:
     entries = []
 
     if phone == "web-client":
-        result = (
-            supabase.table(LEDGER)
-            .select("*")
-            .gte("created_at", start_iso)
-            .order("created_at", desc=False)
-            .execute()
-        )
-        if result.data:
-            entries = result.data
+        entries = list(db[LEDGER].find({
+            "created_at": {"$gte": start_iso}
+        }).sort("created_at", 1))
     else:
         phones_to_fetch = [phone, "web-client"]
-        result = (
-            supabase.table(LEDGER)
-            .select("*")
-            .in_("phone", phones_to_fetch)
-            .gte("created_at", start_iso)
-            .order("created_at", desc=False)
-            .execute()
-        )
-        if result.data:
-            entries = result.data
+        entries = list(db[LEDGER].find({
+            "phone": {"$in": phones_to_fetch},
+            "created_at": {"$gte": start_iso}
+        }).sort("created_at", 1))
 
     # ── Inventory (for opening/closing stock valuation) ────────────────────
     inv_rows = []
     for try_phone in [phone, "web-client"] if phone != "web-client" else [phone]:
-        inv_result = (
-            supabase.table(TABLE)
-            .select("*")
-            .eq("phone", try_phone)
-            .eq("stock_date", date.today().isoformat())
-            .eq("is_active", True)
-            .execute()
-        )
-        if inv_result.data:
-            inv_rows = inv_result.data
+        inv_rows = list(db[TABLE].find({
+            "phone": try_phone,
+            "stock_date": date.today().isoformat(),
+            "is_active": True
+        }))
+        if inv_rows:
             break
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
@@ -514,15 +498,19 @@ def generate_pnl_pdf(phone: str, vendor_name: str = "Vendor") -> Optional[str]:
     pdf_bytes = bytes(pdf.output())
 
     try:
-        supabase = get_supabase()
-        supabase.storage.from_("reports").upload(
-            file_name,
-            pdf_bytes,
-            file_options={"content-type": "application/pdf"},
-        )
-        public_url = supabase.storage.from_("reports").get_public_url(file_name)
-        logger.info("P&L report uploaded: %s", public_url)
+        from pathlib import Path
+        import os
+        
+        target_dir = Path("static/reports")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        target_path = target_dir / file_name
+        with target_path.open("wb") as f:
+            f.write(pdf_bytes)
+            
+        public_url = f"/static/reports/{file_name}"
+        logger.info("P&L report saved locally: %s", public_url)
         return public_url
     except Exception as upload_exc:
-        logger.error("Failed to upload P&L report: %s", upload_exc)
+        logger.error("Failed to save P&L report: %s", upload_exc)
         return None

@@ -3,6 +3,7 @@ import { create } from "zustand";
 type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
 export type ThemeMode = "day" | "night";
+export type UserRole = "vendor" | "admin";
 
 export type SummaryData = {
   transcript: string;
@@ -70,6 +71,20 @@ export type AIInsightsData = {
 
 const DEFAULT_VENDOR_ID = "123e4567-e89b-12d3-a456-426614174000";
 const MODE_STORAGE_KEY = "vyapaarsaathi-theme-mode";
+const AUTH_ROLE_KEY = "vyapaarsaathi-role";
+const AUTH_VENDOR_KEY = "vyapaarsaathi-auth-vendor";
+
+function getInitialRole(): UserRole | null {
+  if (typeof window === "undefined") return null;
+  const r = window.localStorage.getItem(AUTH_ROLE_KEY);
+  if (r === "vendor" || r === "admin") return r;
+  return null;
+}
+
+function getInitialAuthVendor(): string {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(AUTH_VENDOR_KEY) || "";
+}
 
 const initialSummary: SummaryData = {
   transcript: "No recording yet",
@@ -180,6 +195,14 @@ async function fetchJson(path: string, options?: RequestInit): Promise<JsonObjec
 }
 
 interface AppState {
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  userRole: UserRole | null;
+  isLoggedIn: boolean;
+  loginAsVendor: (phone: string) => void;
+  loginAsAdmin: () => void;
+  logout: () => void;
+
+  // ── Theme & preferences ───────────────────────────────────────────────────
   mode: ThemeMode;
   setMode: (mode: ThemeMode) => void;
   vendorId: string;
@@ -253,6 +276,27 @@ let chunksArray: BlobPart[] = [];
 let stopTimerRef: number | null = null;
 
 export const useStore = create<AppState>((set, get) => ({
+  // ── Auth ──────────────────────────────────────────────────────────────────
+  userRole: getInitialRole(),
+  isLoggedIn: getInitialRole() !== null,
+  loginAsVendor: (phone: string) => {
+    window.localStorage.setItem(AUTH_ROLE_KEY, "vendor");
+    window.localStorage.setItem(AUTH_VENDOR_KEY, phone);
+    // Also set vendorId so all existing API calls use this phone
+    window.localStorage.setItem("vyapaarsaathi-auth-vendor", phone);
+    set({ userRole: "vendor", isLoggedIn: true, vendorId: phone });
+  },
+  loginAsAdmin: () => {
+    window.localStorage.setItem(AUTH_ROLE_KEY, "admin");
+    set({ userRole: "admin", isLoggedIn: true });
+  },
+  logout: () => {
+    window.localStorage.removeItem(AUTH_ROLE_KEY);
+    window.localStorage.removeItem(AUTH_VENDOR_KEY);
+    set({ userRole: null, isLoggedIn: false });
+  },
+
+  // ── Theme & preferences ───────────────────────────────────────────────────
   mode: getInitialMode(),
   setMode: (mode) => {
     window.localStorage.setItem(MODE_STORAGE_KEY, mode);
