@@ -55,12 +55,28 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
         "is_active": True
     }).sort("item_name", 1))
 
+    # If no rows for today, auto-roll over from yesterday's catalog
+    if not manual_rows and phone != "web-client":
+        try:
+            carried = reset_daily_stock(phone)
+            if carried > 0:
+                logger.info("Auto-rolled %d inventory rows for %s on %s", carried, phone, today)
+                manual_rows = list(db[TABLE].find({
+                    "phone": phone,
+                    "stock_date": today,
+                    "is_active": True
+                }).sort("item_name", 1))
+        except Exception as exc:
+            logger.warning("Auto-rollover failed for %s: %s", phone, exc)
+
+    # Final fallback to web-client shared items
     if not manual_rows and phone != "web-client":
         manual_rows = list(db[TABLE].find({
             "phone": "web-client",
             "stock_date": today,
             "is_active": True
         }).sort("item_name", 1))
+
 
     manual_items: Dict[str, Dict[str, Any]] = {r["item_name"]: r for r in manual_rows}
 
@@ -109,6 +125,8 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
         if item_name in manual_items:
             # Manual catalog item — show with full stock data
             row = dict(manual_items[item_name])
+            # Strip MongoDB _id (ObjectId is not JSON serializable)
+            row.pop("_id", None)
             # Add voice-derived stats as extra fields
             row["voice_sold_today"] = item_today_qty.get(item_name, 0)
             row["voice_total_sold"] = item_total_qty.get(item_name, 0)

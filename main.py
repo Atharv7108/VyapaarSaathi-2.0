@@ -29,6 +29,8 @@ from services.voice_ledger import (
     is_audio_message,
     process_voice_message,
     send_whatsapp_reply,
+    send_whatsapp_buttons,
+    send_whatsapp_list,
     convert_audio,
     extract_json,
     save_to_db,
@@ -43,14 +45,28 @@ from services.vendor_manager import (
     update_last_active,
     set_vendor_name,
     set_vendor_state,
+    set_vendor_category,
+    set_vendor_business_name,
     update_vendor_onboarding,
     extract_name_from_text,
+    extract_category_from_reply,
     list_vendors,
+    BUSINESS_CATEGORIES,
+    CATEGORY_ID_TO_LABEL,
     WELCOME_MESSAGE,
+    CONSENT_ACCEPTED_MESSAGE,
+    CONSENT_DECLINED_MESSAGE,
     NAME_SAVED_TEMPLATE,
+    CATEGORY_SAVED_TEMPLATE,
+    ONBOARDING_COMPLETE_TEMPLATE,
+    VOICE_PROMPT_MESSAGE,
     STATE_NEW,
+    STATE_AWAITING_CONSENT,
     STATE_AWAITING_NAME,
+    STATE_AWAITING_CATEGORY,
+    STATE_AWAITING_BIZ_NAME,
     STATE_ACTIVE,
+    STATE_DECLINED,
 )
 from services.inventory import (
     get_inventory,
@@ -112,30 +128,95 @@ def _parse_num_media(value: Any) -> int:
 def _send_safe_reply(to_phone: str, body: str) -> None:
     try:
         send_whatsapp_reply(to_phone, body)
-    except Exception as exc:  # pragma: no cover - external API path
+    except Exception as exc:
         logger.error("Failed to send WhatsApp reply: %s", exc)
 
 
+def _send_safe_buttons(
+    to_phone: str, body: str, buttons: list,
+    header: str = None, footer: str = None
+) -> None:
+    try:
+        send_whatsapp_buttons(to_phone, body, buttons, header=header, footer=footer)
+    except Exception as exc:
+        logger.error("Failed to send WhatsApp button message: %s", exc)
+
+
+def _send_safe_list(
+    to_phone: str, body: str, button_label: str, sections: list,
+    header: str = None, footer: str = None
+) -> None:
+    try:
+        send_whatsapp_list(to_phone, body, button_label, sections, header=header, footer=footer)
+    except Exception as exc:
+        logger.error("Failed to send WhatsApp list message: %s", exc)
+
+
+def _send_welcome_with_buttons(sender: str) -> None:
+    """Send the professional welcome + Yes/No consent buttons."""
+    set_vendor_state(sender, STATE_AWAITING_CONSENT)
+    _send_safe_buttons(
+        sender,
+        WELCOME_MESSAGE,
+        buttons=[
+            {"id": "consent_yes", "title": "✅ Haan, Jodein!"},
+            {"id": "consent_no",  "title": "❌ Abhi Nahi"},
+        ],
+        footer="VyapaarSaathi — Free WhatsApp Ledger",
+    )
+
+
+def _send_category_list(sender: str) -> None:
+    """Send scrollable list of business categories."""
+    rows = [
+        {
+            "id": cat["id"],
+            "title": cat["title"],
+            "description": cat["description"],
+        }
+        for cat in BUSINESS_CATEGORIES
+    ]
+    sections = [{"title": "Business Category", "rows": rows}]
+    _send_safe_list(
+        sender,
+        body="Apni business category chunein 👇",
+        button_label="Category Chunein",
+        sections=sections,
+        header="Business Category",
+    )
+
+
 def _process_and_reply(sender: str, media_id: str) -> None:
-    """Process a voice message with vendor onboarding check."""
-    # --- Vendor onboarding gate ---
+    """Process a voice message with onboarding gate check."""
     try:
         vendor = get_or_create_vendor(sender)
         update_last_active(sender)
         state = vendor.get("state", STATE_ACTIVE)
 
-        if state == STATE_NEW:
-            # First message ever — send welcome and ask for name
-            set_vendor_state(sender, STATE_AWAITING_NAME)
-            _send_safe_reply(sender, WELCOME_MESSAGE)
+        # If vendor is not fully onboarded, guide them back
+        if state in (STATE_NEW, STATE_DECLINED):
+            _send_welcome_with_buttons(sender)
             return
-
-        if state == STATE_AWAITING_NAME:
-            # They sent a voice note instead of their name — gently remind them
+        if state == STATE_AWAITING_CONSENT:
             _send_safe_reply(
                 sender,
-                "🙏 Pehle apna naam text mein bhejein (jaise: \"Mera naam Ramesh hai\"). "
-                "Naam ke baad aap voice entries shuru kar sakte hain!"
+                "🙏 Pehle neeche buttons mein se jawab dein — kya aap VyapaarSaathi se judna chahte hain?"
+            )
+            return
+        if state == STATE_AWAITING_NAME:
+            _send_safe_reply(
+                sender,
+                "🙏 Pehle *apna naam* text mein bhejein (jaise: \"Ramesh\")."
+                " Naam ke baad aap voice entries shuru kar sakte hain!"
+            )
+            return
+        if state == STATE_AWAITING_CATEGORY:
+            _send_category_list(sender)
+            return
+        if state == STATE_AWAITING_BIZ_NAME:
+            _send_safe_reply(
+                sender,
+                "🙏 Pehle *aapke business ka naam* type karein, phir voice entries shuru hongi!"
             )
             return
     except Exception as exc:
@@ -144,7 +225,7 @@ def _process_and_reply(sender: str, media_id: str) -> None:
     # --- Normal voice processing ---
     try:
         reply_body = process_voice_message(sender, media_id)
-    except Exception as exc:  # pragma: no cover - external API path
+    except Exception as exc:
         import traceback
         with open("/tmp/webhook_err.log", "w") as f:
             f.write(traceback.format_exc())
@@ -155,35 +236,108 @@ def _process_and_reply(sender: str, media_id: str) -> None:
     _send_safe_reply(sender, reply_body)
 
 
-def _handle_text_message(sender: str, text: str) -> None:
-    """Handle an incoming plain-text message (used for onboarding name capture)."""
+def _handle_interactive_reply(sender: str, reply_id: str, reply_title: str) -> None:
+    """Handle button/list reply from WhatsApp interactive messages."""
     try:
         vendor = get_or_create_vendor(sender)
         update_last_active(sender)
         state = vendor.get("state", STATE_ACTIVE)
 
-        if state in (STATE_NEW, STATE_AWAITING_NAME):
+        # ── Consent step ──────────────────────────────────────────────────────
+        if state == STATE_AWAITING_CONSENT:
+            if reply_id == "consent_yes":
+                set_vendor_state(sender, STATE_AWAITING_NAME)
+                _send_safe_reply(sender, CONSENT_ACCEPTED_MESSAGE)
+            else:
+                set_vendor_state(sender, STATE_DECLINED)
+                _send_safe_reply(sender, CONSENT_DECLINED_MESSAGE)
+            return
+
+        # ── Category step ─────────────────────────────────────────────────────
+        if state == STATE_AWAITING_CATEGORY:
+            # reply_id is the category id from list selection
+            cat_label = CATEGORY_ID_TO_LABEL.get(reply_id, reply_title)
+            set_vendor_category(sender, reply_id, cat_label)
+            _send_safe_reply(sender, CATEGORY_SAVED_TEMPLATE.format(category=cat_label))
+            return
+
+        logger.info("Interactive reply in state %s from %s — ignored", state, sender)
+    except Exception as exc:
+        logger.warning("_handle_interactive_reply failed: %s", exc)
+
+
+def _handle_text_message(sender: str, text: str) -> None:
+    """Handle an incoming plain-text message throughout the onboarding flow."""
+    try:
+        vendor = get_or_create_vendor(sender)
+        update_last_active(sender)
+        state = vendor.get("state", STATE_ACTIVE)
+
+        # ── First contact / declined — restart onboarding ─────────────────────
+        if state in (STATE_NEW, STATE_DECLINED):
+            _send_welcome_with_buttons(sender)
+            return
+
+        # ── Awaiting consent — nudge to use buttons ───────────────────────────
+        if state == STATE_AWAITING_CONSENT:
+            _send_safe_reply(
+                sender,
+                "🙏 Neeche buttons tap karein:\n• ✅ Haan, Jodein!\n• ❌ Abhi Nahi"
+            )
+            return
+
+        # ── Awaiting name ─────────────────────────────────────────────────────
+        if state == STATE_AWAITING_NAME:
             name = extract_name_from_text(text)
             if name:
-                set_vendor_name(sender, name)
-                reply = NAME_SAVED_TEMPLATE.format(name=name)
+                set_vendor_name(sender, name)  # moves to STATE_AWAITING_CATEGORY
+                _send_safe_reply(sender, NAME_SAVED_TEMPLATE.format(name=name))
+                _send_category_list(sender)
             else:
-                set_vendor_state(sender, STATE_AWAITING_NAME)
-                reply = (
-                    "🙏 Kripya apna naam batayein, jaise:\n"
-                    "• _\"Mera naam Ramesh hai\"_\n"
-                    "• _\"Suresh\"_"
+                _send_safe_reply(
+                    sender,
+                    "🙏 Sirf apna naam type karein, jaise:\n"
+                    "• _Ramesh_\n"
+                    "• _Priya Sharma_"
                 )
-            _send_safe_reply(sender, reply)
             return
+
+        # ── Awaiting category (text fallback — user typed instead of tapping) ─
+        if state == STATE_AWAITING_CATEGORY:
+            result = extract_category_from_reply(text)
+            if result:
+                cat_id, cat_label = result
+                set_vendor_category(sender, cat_id, cat_label)
+                _send_safe_reply(sender, CATEGORY_SAVED_TEMPLATE.format(category=cat_label))
+            else:
+                _send_category_list(sender)
+            return
+
+        # ── Awaiting business name ────────────────────────────────────────────
+        if state == STATE_AWAITING_BIZ_NAME:
+            biz_name = text.strip()
+            if len(biz_name) >= 2:
+                vendor_data = vendor  # already fetched above
+                name = vendor_data.get("name", "Dost")
+                category = vendor_data.get("business_category", "-")
+                set_vendor_business_name(sender, biz_name)  # moves to STATE_ACTIVE
+                _send_safe_reply(
+                    sender,
+                    ONBOARDING_COMPLETE_TEMPLATE.format(
+                        name=name,
+                        business_name=biz_name,
+                        category=category,
+                    )
+                )
+            else:
+                _send_safe_reply(sender, "🙏 Business ka poora naam type karein (kam se kam 2 letters).")
+            return
+
     except Exception as exc:
         logger.warning("Text onboarding handler failed: %s", exc)
 
-    # Vendor is active — text messages aren't supported for entries
-    _send_safe_reply(
-        sender,
-        "🎤 Voice message bhejein apni entry ke liye! (Text messages supported nahi hain)"
-    )
+    # Active vendor — text messages not supported for entries
+    _send_safe_reply(sender, VOICE_PROMPT_MESSAGE)
 
 
 def _is_phone_identifier(value: str) -> bool:
@@ -312,10 +466,26 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
                     media_id = msg.get("audio", {}).get("id")
                     if media_id:
                         background_tasks.add_task(_process_and_reply, sender, str(media_id))
-                # Plain text — used for onboarding name capture
+                # Plain text — used for onboarding name/business capture
                 elif msg_type == "text":
                     text_body = msg.get("text", {}).get("body", "").strip()
                     background_tasks.add_task(_handle_text_message, sender, text_body)
+                # Interactive button reply (consent Yes/No)
+                elif msg_type == "interactive":
+                    interactive = msg.get("interactive", {})
+                    inter_type = interactive.get("type")  # "button_reply" or "list_reply"
+                    if inter_type == "button_reply":
+                        reply = interactive.get("button_reply", {})
+                        background_tasks.add_task(
+                            _handle_interactive_reply, sender,
+                            reply.get("id", ""), reply.get("title", "")
+                        )
+                    elif inter_type == "list_reply":
+                        reply = interactive.get("list_reply", {})
+                        background_tasks.add_task(
+                            _handle_interactive_reply, sender,
+                            reply.get("id", ""), reply.get("title", "")
+                        )
                 else:
                     # Stickers, images, etc. — not supported
                     background_tasks.add_task(_send_safe_reply, sender, NON_AUDIO_RESPONSE)
@@ -394,6 +564,44 @@ def admin_list_vendors(limit: int = 100) -> Dict[str, Any]:
     return {"total": len(vendors), "vendors": vendors}
 
 
+@app.delete("/admin/vendors/{phone:path}")
+def admin_delete_vendor(phone: str) -> Dict[str, Any]:
+    """
+    Admin endpoint: permanently delete a vendor and ALL their associated data
+    (ledger entries, inventory items, vendor record).
+    """
+    from services.vendor_manager import _normalize_phone
+    normalized = _normalize_phone(phone)
+    db = get_db()
+
+    vendor = db["vendors"].find_one({"phone": normalized})
+    if not vendor:
+        raise HTTPException(status_code=404, detail=f"Vendor not found: {phone}")
+
+    # Delete all associated data
+    ledger_result   = db["ledger"].delete_many({"phone": normalized})
+    inventory_result = db["inventory"].delete_many({"phone": normalized})
+    vendor_result   = db["vendors"].delete_one({"phone": normalized})
+
+    logger.info(
+        "Admin deleted vendor %s — ledger: %d, inventory: %d, vendor: %d",
+        normalized,
+        ledger_result.deleted_count,
+        inventory_result.deleted_count,
+        vendor_result.deleted_count,
+    )
+
+    return {
+        "status": "deleted",
+        "phone": normalized,
+        "deleted": {
+            "vendor": vendor_result.deleted_count,
+            "ledger_entries": ledger_result.deleted_count,
+            "inventory_items": inventory_result.deleted_count,
+        },
+    }
+
+
 @app.get("/entries")
 def get_entries(vendor_id: str = "", limit: int = 100) -> Dict[str, Any]:
     """
@@ -406,12 +614,11 @@ def get_entries(vendor_id: str = "", limit: int = 100) -> Dict[str, Any]:
     try:
         query = {}
         incoming_identifier = (vendor_id or "").strip()
-        if _is_phone_identifier(incoming_identifier):
-            normalized = incoming_identifier
-            if not normalized.startswith("whatsapp:"):
-                normalized = f"whatsapp:{normalized}"
+        if incoming_identifier and not _is_uuid(incoming_identifier) and _is_phone_identifier(incoming_identifier):
+            normalized = incoming_identifier if incoming_identifier.startswith("whatsapp:") else f"whatsapp:{incoming_identifier}"
             query["phone"] = normalized
-            
+        
+
         rows = list(db["ledger"].find(query).sort("created_at", -1).limit(safe_limit))
         for row in rows:
             if "_id" in row:
@@ -896,11 +1103,15 @@ def get_inventory_items(vendor_id: str = "", phone: str = "") -> Dict[str, Any]:
     Get today's inventory for a vendor.
     Accepts either phone (WhatsApp) or vendor_id (web UUID).
     """
-    phone_key = phone.strip() or vendor_id.strip() or "web-client"
-    if not phone_key.startswith("whatsapp:") and _is_phone_identifier(phone_key):
-        phone_key = f"whatsapp:{phone_key}"
-    elif _is_uuid(phone_key):
+    raw = phone.strip() or vendor_id.strip()
+    if not raw:
         phone_key = "web-client"
+    elif _is_uuid(raw):
+        phone_key = "web-client"
+    elif _is_phone_identifier(raw):
+        phone_key = raw if raw.startswith("whatsapp:") else f"whatsapp:{raw}"
+    else:
+        phone_key = raw
     try:
         items = get_inventory(phone_key)
         return {"inventory": items, "date": __import__('datetime').date.today().isoformat()}
@@ -965,16 +1176,26 @@ def get_pnl_report(vendor_id: str = "", phone: str = "") -> Dict[str, str]:
     """
     Generate and return the URL for the Trading & P&L IT Return format PDF.
     """
-    phone_key = phone.strip() or vendor_id.strip() or "web-client"
-    if not phone_key.startswith("whatsapp:") and _is_phone_identifier(phone_key):
-        phone_key = f"whatsapp:{phone_key}"
-    elif _is_uuid(phone_key):
+    raw = phone.strip() or vendor_id.strip()
+    if not raw:
         phone_key = "web-client"
-        
+    elif _is_uuid(raw):
+        phone_key = "web-client"
+    elif _is_phone_identifier(raw):
+        phone_key = raw if raw.startswith("whatsapp:") else f"whatsapp:{raw}"
+    else:
+        phone_key = raw
+
     try:
         from services.report_generator import generate_pnl_pdf
-        # Default name, web frontend doesn't pass the profile name yet easily
-        pdf_url = generate_pnl_pdf(phone_key, vendor_name="PROPRIETOR")
+        # Look up vendor name from DB for proper report header
+        vendor_doc = get_db()["vendors"].find_one({"phone": phone_key}, {"name": 1, "business_name": 1})
+        display_name = (
+            (vendor_doc or {}).get("business_name")
+            or (vendor_doc or {}).get("name")
+            or "PROPRIETOR"
+        )
+        pdf_url = generate_pnl_pdf(phone_key, vendor_name=display_name)
         if not pdf_url:
             raise HTTPException(status_code=404, detail="No ledger data found to generate report.")
         return {"pdf_url": pdf_url}
@@ -983,6 +1204,7 @@ def get_pnl_report(vendor_id: str = "", phone: str = "") -> Dict[str, str]:
     except Exception as exc:
         logger.exception("/api/report GET failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Report generation failed: {exc}")
+
 
 class InventoryResetIn(BaseModel):
     vendor_id: str = ""

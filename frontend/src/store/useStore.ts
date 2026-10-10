@@ -86,6 +86,14 @@ function getInitialAuthVendor(): string {
   return window.localStorage.getItem(AUTH_VENDOR_KEY) || "";
 }
 
+function getInitialVendorId(): string {
+  if (typeof window === "undefined") return DEFAULT_VENDOR_ID;
+  // If a vendor phone is stored from login, use that as the vendor ID
+  // so API calls like /inventory?vendor_id=+919892727629 hit the right data
+  const storedPhone = window.localStorage.getItem(AUTH_VENDOR_KEY) || "";
+  return storedPhone || DEFAULT_VENDOR_ID;
+}
+
 const initialSummary: SummaryData = {
   transcript: "No recording yet",
   earned: 0,
@@ -328,7 +336,7 @@ export const useStore = create<AppState>((set, get) => ({
     window.localStorage.setItem("vyapaarsaathi-pin", val);
     set({ pin: val });
   },
-  vendorId: DEFAULT_VENDOR_ID,
+  vendorId: getInitialVendorId(),
   setVendorId: (id) => set({ vendorId: id }),
   output: { message: "Run any action to see backend output" },
   setOutput: (out) => set({ output: out }),
@@ -697,17 +705,35 @@ export const useStore = create<AppState>((set, get) => ({
   downloadReport: async () => {
     const { vendorId } = get();
     try {
+      // Step 1: get the PDF URL from the API
       const data = await fetchJson(`/api/report?vendor_id=${encodeURIComponent(vendorId)}`);
-      if (data.pdf_url && typeof data.pdf_url === "string") {
-        window.open(data.pdf_url, "_blank");
-      } else {
-        alert("Failed to generated report or no sales data found.");
+      if (!data.pdf_url || typeof data.pdf_url !== "string") {
+        alert("Koi sales data nahi mila report ke liye. Pehle kuch entries record karein!");
+        return;
       }
+
+      // Step 2: fetch the PDF as binary blob
+      const pdfRes = await fetch(data.pdf_url);
+      if (!pdfRes.ok) throw new Error(`PDF fetch failed: ${pdfRes.status}`);
+      const blob = await pdfRes.blob();
+
+      // Step 3: trigger browser download via hidden <a> tag
+      const blobUrl = URL.createObjectURL(blob);
+      const fileName = data.pdf_url.split("/").pop() || "VyapaarSaathi_Report.pdf";
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = fileName;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      // Release memory
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     } catch (e: any) {
       console.warn("downloadReport failed:", e);
-      alert("Error fetching report from server.");
+      alert("Report download mein error aaya. Dobara try karein.");
     }
   },
+
 
   // ── AI Insights ────────────────────────────────────────────────────────────
   runAIInsights: async () => {

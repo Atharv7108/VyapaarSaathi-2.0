@@ -562,6 +562,122 @@ def send_whatsapp_reply(to_phone: str, body: str, media_url: Optional[str] = Non
         raise RuntimeError(f"WhatsApp send failed: {exc}") from exc
 
 
+def send_whatsapp_buttons(
+    to_phone: str,
+    body: str,
+    buttons: List[Dict[str, str]],
+    header: Optional[str] = None,
+    footer: Optional[str] = None,
+) -> str:
+    """Send an interactive button message (max 3 buttons).
+    
+    Each button dict: {"id": "btn_id", "title": "Button Text"} (title max 20 chars)
+    """
+    settings = get_settings()
+    url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {settings.whatsapp_api_token}",
+        "Content-Type": "application/json",
+    }
+    recipient = to_phone.replace("whatsapp:", "").replace("+", "")
+
+    btn_list = [
+        {"type": "reply", "reply": {"id": b["id"], "title": b["title"][:20]}}
+        for b in buttons[:3]
+    ]
+
+    interactive: Dict[str, Any] = {
+        "type": "button",
+        "body": {"text": body},
+        "action": {"buttons": btn_list},
+    }
+    if header:
+        interactive["header"] = {"type": "text", "text": header}
+    if footer:
+        interactive["footer"] = {"text": footer}
+
+    payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("messages", [{}])[0].get("id", "")
+    except Exception as exc:
+        logger.warning("send_whatsapp_buttons failed, falling back to text: %s", exc)
+        # Fallback: send as plain text with options listed
+        fallback_text = body + "\n\n" + "\n".join(
+            f"• {b['title']}" for b in buttons
+        )
+        return send_whatsapp_reply(to_phone, fallback_text)
+
+
+def send_whatsapp_list(
+    to_phone: str,
+    body: str,
+    button_label: str,
+    sections: List[Dict[str, Any]],
+    header: Optional[str] = None,
+    footer: Optional[str] = None,
+) -> str:
+    """Send an interactive list message (supports up to 10 rows across sections).
+    
+    sections format:
+    [{"title": "Section Title", "rows": [{"id": "row_id", "title": "Row Title", "description": "Optional"}]}]
+    """
+    settings = get_settings()
+    url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {settings.whatsapp_api_token}",
+        "Content-Type": "application/json",
+    }
+    recipient = to_phone.replace("whatsapp:", "").replace("+", "")
+
+    interactive: Dict[str, Any] = {
+        "type": "list",
+        "body": {"text": body},
+        "action": {
+            "button": button_label[:20],
+            "sections": sections,
+        },
+    }
+    if header:
+        interactive["header"] = {"type": "text", "text": header}
+    if footer:
+        interactive["footer"] = {"text": footer}
+
+    payload: Dict[str, Any] = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": "interactive",
+        "interactive": interactive,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("messages", [{}])[0].get("id", "")
+    except Exception as exc:
+        logger.warning("send_whatsapp_list failed, falling back to text: %s", exc)
+        # Fallback: send as plain text
+        all_rows = []
+        for sec in sections:
+            for row in sec.get("rows", []):
+                all_rows.append(f"• {row['title']}")
+        fallback_text = body + "\n\n" + "\n".join(all_rows)
+        return send_whatsapp_reply(to_phone, fallback_text)
+
+
+
+
 def _build_inventory_snapshot_message(items: List[Dict[str, Any]]) -> str:
     """Create a concise WhatsApp-friendly inventory snapshot."""
 
@@ -943,7 +1059,7 @@ def process_voice_message(phone: str, media_id: str) -> str:
 
         if result["status"] == "complete":
             # Save all entries — use web-client as canonical phone so web UI sees them
-            return _save_and_reply(phone, result.get("entries_to_save", []), media_url, catalog_phone=catalog_phone)
+            return _save_and_reply(phone, result.get("entries_to_save", []), media_id, catalog_phone=catalog_phone)
 
     # ── Fresh message — analyze against inventory ────────────────────────
     # First handle command-style intents separately.
@@ -986,7 +1102,7 @@ def process_voice_message(phone: str, media_id: str) -> str:
             alert_lines = _save_and_reply_silent(
                 phone,
                 analysis["entries_to_save"],
-                media_url,
+                media_id,
                 catalog_phone=catalog_phone,
             )
         question = analysis.get("counter_question_hi", "")
@@ -996,7 +1112,7 @@ def process_voice_message(phone: str, media_id: str) -> str:
         return f"🤖 {question}"
 
     # All complete — save everything
-    return _save_and_reply(phone, analysis.get("entries_to_save", []), media_url, catalog_phone=catalog_phone)
+    return _save_and_reply(phone, analysis.get("entries_to_save", []), media_id, catalog_phone=catalog_phone)
 
 
 def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, catalog_phone: str = "web-client") -> str:

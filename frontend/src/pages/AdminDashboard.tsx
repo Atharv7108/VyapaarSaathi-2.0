@@ -6,11 +6,13 @@ type Vendor = {
   phone: string;
   name: string | null;
   business_name: string | null;
+  business_category: string | null;
   state: string;
   language: string;
   registered_at: string;
   last_active: string;
   active: boolean;
+  entry_count?: number;
 };
 
 function formatDate(iso: string) {
@@ -28,6 +30,24 @@ function StatCard({ label, value, color }: { label: string; value: string | numb
   );
 }
 
+function StateChip({ state }: { state: string }) {
+  const map: Record<string, { label: string; cls: string }> = {
+    active:                { label: "✅ Active",           cls: "bg-green-100 text-green-700" },
+    awaiting_name:         { label: "⏳ Awaiting Name",    cls: "bg-amber-100 text-amber-700" },
+    awaiting_consent:      { label: "🤝 Awaiting Consent", cls: "bg-blue-100 text-blue-700" },
+    awaiting_category:     { label: "🏷 Awaiting Category",cls: "bg-purple-100 text-purple-700" },
+    awaiting_business_name:{ label: "🏪 Awaiting Biz Name",cls: "bg-indigo-100 text-indigo-700" },
+    declined:              { label: "❌ Declined",          cls: "bg-red-100 text-red-600" },
+    new:                   { label: "🆕 New",               cls: "bg-slate-100 text-slate-600" },
+  };
+  const { label, cls } = map[state] ?? { label: state, cls: "bg-slate-100 text-slate-600" };
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
 export default function AdminDashboard() {
   const navigate = useNavigate();
   const { logout } = useStore();
@@ -35,6 +55,9 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [deletingPhone, setDeletingPhone] = useState<string | null>(null);
+  const [confirmPhone, setConfirmPhone] = useState<string | null>(null);
+  const [deleteResult, setDeleteResult] = useState<string | null>(null);
 
   useEffect(() => {
     fetchVendors();
@@ -52,6 +75,27 @@ export default function AdminDashboard() {
       setError(`Failed to load vendors: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleDelete(phone: string) {
+    setDeletingPhone(phone);
+    setDeleteResult(null);
+    try {
+      const encoded = encodeURIComponent(phone);
+      const res = await fetch(`/admin/vendors/${encoded}`, { method: "DELETE" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+      const { deleted } = data;
+      setDeleteResult(
+        `✅ Deleted: ${deleted.ledger_entries} entries, ${deleted.inventory_items} inventory items`
+      );
+      setVendors(prev => prev.filter(v => v.phone !== phone));
+    } catch (e) {
+      setDeleteResult(`❌ Failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeletingPhone(null);
+      setConfirmPhone(null);
     }
   }
 
@@ -106,12 +150,22 @@ export default function AdminDashboard() {
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
 
+        {/* Delete result toast */}
+        {deleteResult && (
+          <div className={`flex items-center justify-between gap-4 px-5 py-3.5 rounded-2xl text-sm font-semibold shadow-md ${
+            deleteResult.startsWith("✅") ? "bg-green-50 text-green-800 border border-green-200" : "bg-red-50 text-red-800 border border-red-200"
+          }`}>
+            <span>{deleteResult}</span>
+            <button onClick={() => setDeleteResult(null)} className="text-lg leading-none opacity-60 hover:opacity-100">✕</button>
+          </div>
+        )}
+
         {/* Stats */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <StatCard label="Total Vendors" value={vendors.length} color="bg-slate-900 text-white" />
           <StatCard label="Active" value={active} color="bg-green-50 text-green-800" />
           <StatCard label="Onboarded" value={onboarded} color="bg-orange-50 text-orange-800" />
-          <StatCard label="Awaiting Name" value={pending} color="bg-amber-50 text-amber-800" />
+          <StatCard label="Pending" value={pending} color="bg-amber-50 text-amber-800" />
         </div>
 
         {/* Vendors table */}
@@ -159,10 +213,10 @@ export default function AdminDashboard() {
                     <th className="px-6 py-4 text-left">Vendor</th>
                     <th className="px-6 py-4 text-left">Phone</th>
                     <th className="px-6 py-4 text-left">State</th>
-                    <th className="px-6 py-4 text-left">Language</th>
+                    <th className="px-6 py-4 text-left">Entries</th>
                     <th className="px-6 py-4 text-left">Registered</th>
                     <th className="px-6 py-4 text-left">Last Active</th>
-                    <th className="px-6 py-4 text-left">Status</th>
+                    <th className="px-6 py-4 text-center">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-50">
@@ -172,23 +226,45 @@ export default function AdminDashboard() {
                         <div>
                           <p className="font-bold text-slate-900">{v.name || <span className="text-slate-400 italic">No name yet</span>}</p>
                           {v.business_name && <p className="text-xs text-slate-500 mt-0.5">{v.business_name}</p>}
+                          {v.business_category && <p className="text-xs text-orange-500 mt-0.5">{v.business_category}</p>}
                         </div>
                       </td>
                       <td className="px-6 py-4 font-mono text-xs text-slate-600">{v.phone.replace("whatsapp:", "")}</td>
-                      <td className="px-6 py-4">
-                        <span className={`inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-full ${
-                          v.state === "active" ? "bg-green-100 text-green-700" :
-                          v.state === "awaiting_name" ? "bg-amber-100 text-amber-700" :
-                          "bg-slate-100 text-slate-600"
-                        }`}>
-                          {v.state === "active" ? "✅ Active" : v.state === "awaiting_name" ? "⏳ Awaiting Name" : v.state}
+                      <td className="px-6 py-4"><StateChip state={v.state} /></td>
+                      <td className="px-6 py-4 text-center">
+                        <span className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-slate-100 text-xs font-bold text-slate-700">
+                          {v.entry_count ?? 0}
                         </span>
                       </td>
-                      <td className="px-6 py-4 text-slate-600 uppercase text-xs font-bold">{v.language}</td>
                       <td className="px-6 py-4 text-xs text-slate-500">{formatDate(v.registered_at)}</td>
                       <td className="px-6 py-4 text-xs text-slate-500">{formatDate(v.last_active)}</td>
-                      <td className="px-6 py-4">
-                        <span className={`w-2 h-2 rounded-full inline-block ${v.active ? "bg-green-500" : "bg-slate-300"}`} />
+                      <td className="px-6 py-4 text-center">
+                        {confirmPhone === v.phone ? (
+                          /* Confirm row */
+                          <div className="flex items-center justify-center gap-2">
+                            <span className="text-xs text-red-600 font-semibold">Sure?</span>
+                            <button
+                              onClick={() => handleDelete(v.phone)}
+                              disabled={deletingPhone === v.phone}
+                              className="px-3 py-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition disabled:opacity-50"
+                            >
+                              {deletingPhone === v.phone ? "..." : "Yes, Delete"}
+                            </button>
+                            <button
+                              onClick={() => setConfirmPhone(null)}
+                              className="px-3 py-1 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold transition"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmPhone(v.phone)}
+                            className="px-3 py-1.5 rounded-xl bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold border border-red-100 hover:border-red-200 transition"
+                          >
+                            🗑 Delete
+                          </button>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -197,6 +273,16 @@ export default function AdminDashboard() {
             </div>
           )}
         </div>
+
+        {/* Warning note */}
+        <div className="flex items-start gap-3 px-5 py-4 rounded-2xl bg-amber-50 border border-amber-200 text-sm text-amber-800">
+          <span className="text-xl">⚠️</span>
+          <div>
+            <p className="font-bold">Deleting a vendor is permanent and irreversible.</p>
+            <p className="text-xs mt-0.5 opacity-80">All ledger entries and inventory data for that vendor will be permanently erased from the database.</p>
+          </div>
+        </div>
+
       </main>
     </div>
   );
