@@ -534,6 +534,35 @@ def save_to_db(phone: str, extracted_data: Dict[str, Any], audio_url: str, catal
 
 
 
+def _handle_meta_response(response: requests.Response, recipient: str) -> Dict[str, Any]:
+    if not response.ok:
+        try:
+            err_json = response.json().get("error", {})
+            err_code = err_json.get("code")
+            err_msg = err_json.get("message", response.text)
+            err_data = err_json.get("error_data", {}).get("details", "")
+
+            if err_code == 131030:
+                raise RuntimeError(
+                    f"Meta Sandbox restriction: Recipient +{recipient} is not in your allowed test numbers on Meta Developer Portal. "
+                    f"Add this phone number in your Meta WhatsApp test recipient list, or use 'Approve & Activate' to onboard them directly."
+                )
+            elif err_code == 131047:
+                raise RuntimeError(
+                    f"WhatsApp 24-Hour window expired for +{recipient}. Meta requires pre-approved template messages to re-engage past 24 hours. "
+                    f"You can use 'Approve & Activate' to onboard them directly."
+                )
+            elif err_code == 190:
+                raise RuntimeError("Meta WhatsApp Access Token has expired. Please update WHATSAPP_API_TOKEN in your environment.")
+            else:
+                detail_str = f" - {err_data}" if err_data else ""
+                raise RuntimeError(f"WhatsApp API error ({err_code}): {err_msg}{detail_str}")
+        except (ValueError, KeyError, AttributeError):
+            response.raise_for_status()
+
+    return response.json()
+
+
 def send_whatsapp_reply(to_phone: str, body: str, media_url: Optional[str] = None) -> str:
     settings = get_settings()
 
@@ -555,11 +584,36 @@ def send_whatsapp_reply(to_phone: str, body: str, media_url: Optional[str] = Non
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = _handle_meta_response(response, recipient)
         return data.get("messages", [{}])[0].get("id", "")
     except Exception as exc:
-        raise RuntimeError(f"WhatsApp send failed: {exc}") from exc
+        raise RuntimeError(f"{exc}") from exc
+
+
+def send_whatsapp_template(to_phone: str, template_name: str = "hello_world", language_code: str = "en_US") -> str:
+    """Send an official pre-approved Meta WhatsApp template (works even outside 24h customer window)."""
+    settings = get_settings()
+    url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
+    headers = {
+        "Authorization": f"Bearer {settings.whatsapp_api_token}",
+        "Content-Type": "application/json",
+    }
+    recipient = to_phone.replace("whatsapp:", "").replace("+", "")
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": recipient,
+        "type": "template",
+        "template": {
+            "name": template_name,
+            "language": {"code": language_code}
+        }
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        data = _handle_meta_response(response, recipient)
+        return data.get("messages", [{}])[0].get("id", "")
+    except Exception as exc:
+        raise RuntimeError(f"{exc}") from exc
 
 
 def send_whatsapp_buttons(
@@ -606,11 +660,12 @@ def send_whatsapp_buttons(
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = _handle_meta_response(response, recipient)
         return data.get("messages", [{}])[0].get("id", "")
     except Exception as exc:
-        logger.warning("send_whatsapp_buttons failed, falling back to text: %s", exc)
+        logger.warning("send_whatsapp_buttons failed: %s", exc)
+        if "Meta Sandbox restriction" in str(exc) or "24-Hour window expired" in str(exc):
+            raise
         # Fallback: send as plain text with options listed
         fallback_text = body + "\n\n" + "\n".join(
             f"• {b['title']}" for b in buttons
@@ -662,11 +717,12 @@ def send_whatsapp_list(
 
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        data = _handle_meta_response(response, recipient)
         return data.get("messages", [{}])[0].get("id", "")
     except Exception as exc:
-        logger.warning("send_whatsapp_list failed, falling back to text: %s", exc)
+        logger.warning("send_whatsapp_list failed: %s", exc)
+        if "Meta Sandbox restriction" in str(exc) or "24-Hour window expired" in str(exc):
+            raise
         # Fallback: send as plain text
         all_rows = []
         for sec in sections:

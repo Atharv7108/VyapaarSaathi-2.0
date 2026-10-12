@@ -73,6 +73,12 @@ const DEFAULT_VENDOR_ID = "123e4567-e89b-12d3-a456-426614174000";
 const MODE_STORAGE_KEY = "vyapaarsaathi-theme-mode";
 const AUTH_ROLE_KEY = "vyapaarsaathi-role";
 const AUTH_VENDOR_KEY = "vyapaarsaathi-auth-vendor";
+const AUTH_ADMIN_TOKEN_KEY = "vyapaarsaathi-admin-token";
+
+function getInitialAdminToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(AUTH_ADMIN_TOKEN_KEY);
+}
 
 function getInitialRole(): UserRole | null {
   if (typeof window === "undefined") return null;
@@ -206,8 +212,9 @@ interface AppState {
   // ── Auth ──────────────────────────────────────────────────────────────────
   userRole: UserRole | null;
   isLoggedIn: boolean;
+  adminToken: string | null;
   loginAsVendor: (phone: string) => void;
-  loginAsAdmin: () => void;
+  loginAsAdmin: (token?: string) => void;
   logout: () => void;
 
   // ── Theme & preferences ───────────────────────────────────────────────────
@@ -287,6 +294,7 @@ export const useStore = create<AppState>((set, get) => ({
   // ── Auth ──────────────────────────────────────────────────────────────────
   userRole: getInitialRole(),
   isLoggedIn: getInitialRole() !== null,
+  adminToken: getInitialAdminToken(),
   loginAsVendor: (phone: string) => {
     window.localStorage.setItem(AUTH_ROLE_KEY, "vendor");
     window.localStorage.setItem(AUTH_VENDOR_KEY, phone);
@@ -294,14 +302,18 @@ export const useStore = create<AppState>((set, get) => ({
     window.localStorage.setItem("vyapaarsaathi-auth-vendor", phone);
     set({ userRole: "vendor", isLoggedIn: true, vendorId: phone });
   },
-  loginAsAdmin: () => {
+  loginAsAdmin: (token?: string) => {
     window.localStorage.setItem(AUTH_ROLE_KEY, "admin");
-    set({ userRole: "admin", isLoggedIn: true });
+    if (token) {
+      window.localStorage.setItem(AUTH_ADMIN_TOKEN_KEY, token);
+    }
+    set({ userRole: "admin", isLoggedIn: true, adminToken: token || getInitialAdminToken() });
   },
   logout: () => {
     window.localStorage.removeItem(AUTH_ROLE_KEY);
     window.localStorage.removeItem(AUTH_VENDOR_KEY);
-    set({ userRole: null, isLoggedIn: false });
+    window.localStorage.removeItem(AUTH_ADMIN_TOKEN_KEY);
+    set({ userRole: null, isLoggedIn: false, adminToken: null });
   },
 
   // ── Theme & preferences ───────────────────────────────────────────────────
