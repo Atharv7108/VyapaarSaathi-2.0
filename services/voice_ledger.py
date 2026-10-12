@@ -563,7 +563,13 @@ def _handle_meta_response(response: requests.Response, recipient: str) -> Dict[s
     return response.json()
 
 
-def send_whatsapp_reply(to_phone: str, body: str, media_url: Optional[str] = None) -> str:
+def send_whatsapp_reply(
+    to_phone: str,
+    body: str,
+    media_url: Optional[str] = None,
+    media_type: Optional[str] = None,
+    filename: Optional[str] = None,
+) -> str:
     settings = get_settings()
 
     url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
@@ -574,16 +580,52 @@ def send_whatsapp_reply(to_phone: str, body: str, media_url: Optional[str] = Non
     
     recipient = to_phone.replace("whatsapp:", "").replace("+", "")
     
-    payload: Dict[str, Any] = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": recipient,
-        "type": "text",
-        "text": {"preview_url": False, "body": body}
-    }
+    if media_url:
+        clean_url = media_url.split("?")[0].lower()
+        is_image = (
+            media_type == "image"
+            or clean_url.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+        )
+        is_doc = (
+            media_type == "document"
+            or clean_url.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt"))
+        )
+
+        if is_image:
+            image_obj: Dict[str, Any] = {"link": media_url}
+            if body:
+                image_obj["caption"] = body
+            payload: Dict[str, Any] = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": recipient,
+                "type": "image",
+                "image": image_obj,
+            }
+        else:
+            doc_obj: Dict[str, Any] = {"link": media_url}
+            if body:
+                doc_obj["caption"] = body
+            clean_name = filename or os.path.basename(clean_url) or "document.pdf"
+            doc_obj["filename"] = clean_name
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": recipient,
+                "type": "document",
+                "document": doc_obj,
+            }
+    else:
+        payload = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": recipient,
+            "type": "text",
+            "text": {"preview_url": False, "body": body},
+        }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        response = requests.post(url, headers=headers, json=payload, timeout=15)
         data = _handle_meta_response(response, recipient)
         return data.get("messages", [{}])[0].get("id", "")
     except Exception as exc:

@@ -31,6 +31,10 @@ import {
   Settings,
   User as UserIcon,
   ChevronDown,
+  Image as ImageIcon,
+  FileText,
+  Upload,
+  Paperclip,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -364,9 +368,12 @@ export default function AdminDashboard() {
 
   // Broadcast state
   const [broadcastTarget, setBroadcastTarget] = useState<string>("all");
-  const [broadcastMode, setBroadcastMode] = useState<"text" | "template">("text");
+  const [broadcastMode, setBroadcastMode] = useState<"text" | "image" | "document" | "template">("text");
   const [broadcastCustomPhone, setBroadcastCustomPhone] = useState("");
   const [broadcastMessage, setBroadcastMessage] = useState("");
+  const [broadcastMediaUrl, setBroadcastMediaUrl] = useState("");
+  const [broadcastFilename, setBroadcastFilename] = useState("");
+  const [uploadingMedia, setUploadingMedia] = useState(false);
   const [broadcasting, setBroadcasting] = useState(false);
   const [broadcastResult, setBroadcastResult] = useState<{
     total_targets: number;
@@ -605,10 +612,55 @@ export default function AdminDashboard() {
     }
   }
 
+  async function handleMediaUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 25 * 1024 * 1024) {
+      showToast("File is too large. Max size is 25MB.", "error");
+      return;
+    }
+
+    setUploadingMedia(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const headers: Record<string, string> = {};
+      if (adminToken) headers["Authorization"] = `Bearer ${adminToken}`;
+
+      const res = await fetch("/admin/upload-media", {
+        method: "POST",
+        headers,
+        body: formData,
+      });
+      if (handleAuthError(res)) return;
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || `Upload failed: HTTP ${res.status}`);
+
+      setBroadcastMediaUrl(data.url);
+      setBroadcastFilename(data.filename);
+      if (data.media_type === "image") {
+        setBroadcastMode("image");
+      } else {
+        setBroadcastMode("document");
+      }
+      showToast(`Attached ${data.filename}`, "success");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to upload file", "error");
+    } finally {
+      setUploadingMedia(false);
+    }
+  }
+
   async function handleBroadcastSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (broadcastMode === "text" && !broadcastMessage.trim()) {
       showToast("Please enter a message body.", "error");
+      return;
+    }
+    if ((broadcastMode === "image" || broadcastMode === "document") && !broadcastMediaUrl.trim()) {
+      showToast("Please attach a file or enter a media URL.", "error");
       return;
     }
     if (broadcastTarget === "custom" && !broadcastCustomPhone.trim()) {
@@ -627,6 +679,9 @@ export default function AdminDashboard() {
           mode: broadcastMode,
           template_name: "hello_world",
           message: broadcastMessage.trim(),
+          media_url: (broadcastMode === "image" || broadcastMode === "document") ? broadcastMediaUrl.trim() : undefined,
+          media_type: broadcastMode === "image" ? "image" : broadcastMode === "document" ? "document" : undefined,
+          filename: broadcastFilename.trim() || undefined,
         }),
       });
       if (handleAuthError(res)) return;
@@ -1901,36 +1956,44 @@ export default function AdminDashboard() {
               {/* Delivery Mode Toggle */}
               <div style={{ marginBottom: 16 }}>
                 <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#8B93A0", display: "block", marginBottom: 6 }}>
-                  Delivery Mode
+                  Content Format
                 </label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {(["text", "template"] as const).map((mode) => (
-                    <button
-                      key={mode}
-                      type="button"
-                      onClick={() => setBroadcastMode(mode)}
-                      style={{
-                        padding: "12px",
-                        borderRadius: 6,
-                        border: `1px solid ${broadcastMode === mode ? "#F97316" : "#1F242B"}`,
-                        background: broadcastMode === mode ? "rgba(249,115,22,0.06)" : "#0B0D10",
-                        color: broadcastMode === mode ? "#F97316" : "#8B93A0",
-                        cursor: "pointer",
-                        textAlign: "left",
-                        fontFamily: "inherit",
-                        transition: "border-color 0.15s, background 0.15s",
-                      }}
-                    >
-                      <div style={{ fontSize: 13, fontWeight: 600, color: broadcastMode === mode ? "#E6E8EB" : "#8B93A0" }}>
-                        {mode === "text" ? "Custom Announcement" : "Meta Template (hello_world)"}
-                      </div>
-                      <div style={{ fontSize: 11, marginTop: 4, color: "#8B93A0" }}>
-                        {mode === "text"
-                          ? "Requires 24h conversational session"
-                          : "Guaranteed delivery outside 24h window"}
-                      </div>
-                    </button>
-                  ))}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8 }}>
+                  {[
+                    { id: "text",     label: "Text Only",       desc: "Free-form message",   icon: MessageSquare },
+                    { id: "image",    label: "Photo / Image",   desc: "PNG, JPG with caption",icon: ImageIcon },
+                    { id: "document", label: "PDF Document",    desc: "PDF file with caption",icon: FileText },
+                    { id: "template", label: "Meta Template",   desc: "hello_world (24h bypass)", icon: CheckCircle2 },
+                  ].map((tab) => {
+                    const Icon = tab.icon;
+                    const active = broadcastMode === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        onClick={() => setBroadcastMode(tab.id as any)}
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 6,
+                          border: `1px solid ${active ? "#F97316" : "#1F242B"}`,
+                          background: active ? "rgba(249,115,22,0.06)" : "#0B0D10",
+                          color: active ? "#F97316" : "#8B93A0",
+                          cursor: "pointer",
+                          textAlign: "left",
+                          fontFamily: "inherit",
+                          transition: "border-color 0.15s, background 0.15s",
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, fontWeight: 600, color: active ? "#E6E8EB" : "#8B93A0" }}>
+                          <Icon size={13} style={{ color: active ? "#F97316" : "#8B93A0" }} />
+                          {tab.label}
+                        </div>
+                        <div style={{ fontSize: 10, marginTop: 3, color: "#8B93A0" }}>
+                          {tab.desc}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -1988,16 +2051,196 @@ export default function AdminDashboard() {
                   </div>
                 )}
 
-                {broadcastMode === "text" ? (
+                {/* Media Attachment section for Photo or PDF */}
+                {(broadcastMode === "image" || broadcastMode === "document") && (
+                  <div
+                    style={{
+                      padding: 14,
+                      borderRadius: 6,
+                      background: "#0B0D10",
+                      border: "1px solid #1F242B",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 12,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#8B93A0" }}>
+                        {broadcastMode === "image" ? "Attach Photo (PNG / JPG / WEBP)" : "Attach PDF Document"}
+                      </span>
+                      {uploadingMedia && (
+                        <span style={{ fontSize: 11, color: "#F97316", display: "flex", alignItems: "center", gap: 4 }}>
+                          <RefreshCw size={11} style={{ animation: "spin 1s linear infinite" }} /> Uploading…
+                        </span>
+                      )}
+                    </div>
+
+                    {/* File Upload Drop Zone / Button */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                      <label
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "7px 12px",
+                          borderRadius: 6,
+                          border: "1px solid #1F242B",
+                          background: "#111418",
+                          color: "#E6E8EB",
+                          fontSize: 12,
+                          fontWeight: 500,
+                          cursor: "pointer",
+                        }}
+                      >
+                        <Upload size={13} style={{ color: "#F97316" }} />
+                        <span>Choose {broadcastMode === "image" ? "Photo" : "PDF"} from Computer</span>
+                        <input
+                          type="file"
+                          accept={broadcastMode === "image" ? "image/png,image/jpeg,image/webp,image/jpg" : "application/pdf,.pdf"}
+                          onChange={handleMediaUpload}
+                          style={{ display: "none" }}
+                        />
+                      </label>
+
+                      {broadcastMediaUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBroadcastMediaUrl("");
+                            setBroadcastFilename("");
+                          }}
+                          style={{
+                            display: "inline-flex",
+                            alignItems: "center",
+                            gap: 4,
+                            padding: "6px 10px",
+                            borderRadius: 6,
+                            border: "1px solid rgba(239,68,68,0.25)",
+                            background: "transparent",
+                            color: "#fca5a5",
+                            fontSize: 11,
+                            cursor: "pointer",
+                          }}
+                        >
+                          <X size={12} />
+                          Remove Attachment
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Preview box if file attached */}
+                    {broadcastMediaUrl && (
+                      <div
+                        style={{
+                          padding: "10px 12px",
+                          borderRadius: 6,
+                          background: "#111418",
+                          border: "1px solid #1F242B",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 12,
+                        }}
+                      >
+                        {broadcastMode === "image" ? (
+                          <img
+                            src={broadcastMediaUrl}
+                            alt="Attachment preview"
+                            style={{
+                              width: 48,
+                              height: 48,
+                              borderRadius: 4,
+                              objectFit: "cover",
+                              border: "1px solid #1F242B",
+                              background: "#0B0D10",
+                            }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: 40,
+                              height: 40,
+                              borderRadius: 4,
+                              background: "rgba(249,115,22,0.1)",
+                              border: "1px solid rgba(249,115,22,0.3)",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              color: "#F97316",
+                            }}
+                          >
+                            <FileText size={18} />
+                          </div>
+                        )}
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12, fontWeight: 500, color: "#E6E8EB", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                            {broadcastFilename || "Attachment ready"}
+                          </div>
+                          <div style={{ fontSize: 11, color: "#8B93A0", marginTop: 2, ...S.mono, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                            {broadcastMediaUrl}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Direct URL input alternative */}
+                    <div>
+                      <label style={{ fontSize: 11, color: "#8B93A0", display: "block", marginBottom: 4 }}>
+                        Or enter public link (HTTPS):
+                      </label>
+                      <input
+                        type="url"
+                        value={broadcastMediaUrl}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setBroadcastMediaUrl(val);
+                          if (!broadcastFilename && val) {
+                            try {
+                              const path = new URL(val).pathname;
+                              setBroadcastFilename(path.split("/").pop() || "");
+                            } catch {
+                              // Ignore invalid URL parse
+                            }
+                          }
+                        }}
+                        placeholder={broadcastMode === "image" ? "https://example.com/poster.jpg" : "https://example.com/catalog.pdf"}
+                        style={{ ...S.input, ...S.mono, fontSize: 12 }}
+                      />
+                    </div>
+
+                    {broadcastMode === "document" && (
+                      <div>
+                        <label style={{ fontSize: 11, color: "#8B93A0", display: "block", marginBottom: 4 }}>
+                          Document Filename on WhatsApp (e.g. Catalog.pdf):
+                        </label>
+                        <input
+                          type="text"
+                          value={broadcastFilename}
+                          onChange={(e) => setBroadcastFilename(e.target.value)}
+                          placeholder="VyapaarSaathi_Catalogue.pdf"
+                          style={{ ...S.input, fontSize: 12 }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Message Body or Caption */}
+                {broadcastMode !== "template" ? (
                   <div>
                     <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#8B93A0", display: "block", marginBottom: 6 }}>
-                      Message Body
+                      {broadcastMode === "image" || broadcastMode === "document" ? "Caption / Accompanying Text" : "Message Body"}
                     </label>
                     <textarea
-                      rows={5}
+                      rows={broadcastMode === "text" ? 5 : 3}
                       value={broadcastMessage}
                       onChange={(e) => setBroadcastMessage(e.target.value)}
-                      placeholder="Namaste! VyapaarSaathi update: voice ledger features are live…"
+                      placeholder={
+                        broadcastMode === "image"
+                          ? "Check out our newest products! Voice recording is now available..."
+                          : broadcastMode === "document"
+                          ? "Please find attached our latest vendor catalogue and price list..."
+                          : "Namaste! VyapaarSaathi update: voice ledger features are live…"
+                      }
                       style={{ ...S.input, resize: "vertical", lineHeight: 1.5 }}
                     />
                   </div>
@@ -2031,12 +2274,17 @@ export default function AdminDashboard() {
 
                   <button
                     type="submit"
-                    disabled={broadcasting || (broadcastMode === "text" && !broadcastMessage.trim())}
+                    disabled={
+                      broadcasting ||
+                      uploadingMedia ||
+                      (broadcastMode === "text" && !broadcastMessage.trim()) ||
+                      ((broadcastMode === "image" || broadcastMode === "document") && !broadcastMediaUrl.trim())
+                    }
                     style={S.btnPrimary}
                     className="btn-hover"
                   >
                     <Send size={13} style={{ animation: broadcasting ? "spin 1s linear infinite" : "none" }} />
-                    {broadcasting ? "Sending…" : "Send Broadcast"}
+                    {broadcasting ? "Sending Broadcast…" : uploadingMedia ? "Uploading Media…" : "Send Broadcast"}
                   </button>
                 </div>
               </form>

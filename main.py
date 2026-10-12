@@ -726,11 +726,14 @@ class AdminVendorActivateRequest(BaseModel):
 
 
 class AdminBroadcastRequest(BaseModel):
-    message: str
+    message: str = ""
     target: str = "all"
-    mode: str = "text"  # "text" or "template"
+    mode: str = "text"  # "text", "template", "image", "document"
     template_name: Optional[str] = "hello_world"
     custom_phone: Optional[str] = None
+    media_url: Optional[str] = None
+    media_type: Optional[str] = None  # "image" or "document"
+    filename: Optional[str] = None
 
 
 @app.get("/admin/stats")
@@ -1090,6 +1093,72 @@ def admin_activate_vendor(
     }
 
 
+def _make_absolute_url(url: Optional[str], request: Request) -> Optional[str]:
+    if not url:
+        return None
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    proto = request.headers.get("x-forwarded-proto") or ("https" if "ngrok" in host else request.url.scheme)
+    if host:
+        return f"{proto}://{host}{url if url.startswith('/') else '/' + url}"
+    base = str(request.base_url).rstrip("/")
+    return f"{base}{url if url.startswith('/') else '/' + url}"
+
+
+@app.post("/admin/upload-media")
+async def admin_upload_media(
+    request: Request,
+    file: UploadFile = File(...),
+    admin_user: Dict[str, Any] = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """
+    Upload a media attachment (photo or PDF) for WhatsApp broadcast.
+    Saves to static/broadcasts and returns public/relative URL.
+    """
+    from pathlib import Path
+    import uuid
+    import re
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No file selected")
+
+    content_type = file.content_type or ""
+    orig_name = file.filename
+    ext = os.path.splitext(orig_name)[1].lower()
+
+    if content_type.startswith("image/") or ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"]:
+        media_type = "image"
+    elif content_type in ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"] or ext in [".pdf", ".doc", ".docx", ".xls", ".xlsx"]:
+        media_type = "document"
+    else:
+        media_type = "document"
+
+    safe_name = f"{uuid.uuid4().hex[:8]}_{re.sub(r'[^a-zA-Z0-9_.-]', '_', orig_name)}"
+    target_dir = Path("static/broadcasts")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / safe_name
+
+    contents = await file.read()
+    if len(contents) > 25 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File too large (max 25MB)")
+
+    with target_path.open("wb") as f:
+        f.write(contents)
+
+    rel_url = f"/static/broadcasts/{safe_name}"
+    abs_url = _make_absolute_url(rel_url, request)
+
+    return {
+        "status": "uploaded",
+        "url": rel_url,
+        "abs_url": abs_url,
+        "filename": orig_name,
+        "media_type": media_type,
+        "size_bytes": len(contents),
+    }
+
+
 @app.post("/admin/broadcast")
 def admin_broadcast(
     data: AdminBroadcastRequest,
@@ -1099,7 +1168,7 @@ def admin_broadcast(
     """
     Admin endpoint: broadcast an announcement to vendors over WhatsApp.
     Supports targeting All, Active, Pending, specific categories, or a custom test phone number.
-    Supports both free-form Markdown and pre-approved WhatsApp template modes.
+    Supports text, photo (image), PDF document, and pre-approved WhatsApp template modes.
     Protected by JWT.
     """
     from services.vendor_manager import _normalize_phone
@@ -1130,6 +1199,8 @@ def admin_broadcast(
 
         targets = list(db["vendors"].find(query, {"phone": 1, "name": 1, "state": 1}))
 
+    media_url = _make_absolute_url(data.media_url, request) if data.media_url else None
+
     sent_list: List[Dict[str, Any]] = []
     failed_list: List[Dict[str, Any]] = []
 
@@ -1143,7 +1214,13 @@ def admin_broadcast(
                 template_name = data.template_name or "hello_world"
                 msg_id = send_whatsapp_template(phone, template_name=template_name)
             else:
-                msg_id = send_whatsapp_reply(phone, data.message)
+                msg_id = send_whatsapp_reply(
+                    phone,
+                    data.message or "",
+                    media_url=media_url,
+                    media_type=data.media_type,
+                    filename=data.filename,
+                )
             sent_list.append({"phone": phone, "name": v_name, "message_id": msg_id})
         except Exception as e:
             err_msg = str(e)
@@ -1157,10 +1234,12 @@ def admin_broadcast(
         {
             "target": data.target,
             "mode": data.mode,
+            "has_media": bool(media_url),
+            "media_type": data.media_type,
             "total": len(targets),
             "sent": len(sent_list),
             "failed": len(failed_list),
-            "length": len(data.message),
+            "length": len(data.message or ""),
         },
         client_ip,
     )
@@ -1169,6 +1248,7 @@ def admin_broadcast(
         "status": "completed",
         "target": data.target,
         "mode": data.mode,
+        "media_url": media_url,
         "total_targets": len(targets),
         "sent": len(sent_list),
         "failed": len(failed_list),
