@@ -51,7 +51,9 @@ WELCOME_MESSAGE = (
     "🙏 *VyapaarSaathi mein aapka swagat hai!*\n\n"
     "Main aapka WhatsApp ledger AI hoon. Aap mujhe voice messages bhej ke apni daily bikri, "
     "kharcha, aur stock record kar sakte hain — bilkul *free* mein! 🎤📒\n\n"
-    "Kya aap *VyapaarSaathi* se jud ke apna business shuru karna chahte hain?"
+    "Kya aap *VyapaarSaathi* se jud ke apna business shuru karna chahte hain?\n\n"
+    "1️⃣ *Haan, Jodein!* (Reply '1' ya 'Haan')\n"
+    "2️⃣ *Abhi Nahi* (Reply '2' ya 'Nahi')"
 )
 
 # Sent after user clicks "Haan, Jodein"
@@ -271,21 +273,65 @@ def extract_name_from_text(text: str) -> Optional[str]:
     return None
 
 
+def check_consent_reply(text: str) -> Optional[bool]:
+    """Check if a plain text message indicates consent (Yes) or refusal (No).
+    Returns True for Yes, False for No, None if unrecognized.
+    """
+    cleaned = text.strip().lower()
+    # Normalize common emojis and punctuation
+    cleaned = re.sub(r"[✅✔👍🎉👏❌✖️👎!.]", "", cleaned).strip()
+
+    yes_patterns = {
+        "1", "haan", "ha", "han", "haa", "ha ji", "haan ji", "ji haan", "ji",
+        "yes", "y", "yup", "yeah", "yea", "jodein", "jodo", "haan jodein",
+        "haan, jodein", "shuru", "start", "ok", "okay", "theek", "theek hai",
+        "connect", "agree", "sure", "bilkul", "add me", "join"
+    }
+    no_patterns = {
+        "2", "nahi", "na", "nah", "no", "n", "nope", "abhi nahi", "cancel",
+        "stop", "mat karo", "reject", "decline", "nahi chahiye", "rehne do"
+    }
+
+    if cleaned in yes_patterns:
+        return True
+    if cleaned in no_patterns:
+        return False
+
+    # Check prefix or single words
+    words = cleaned.split()
+    if words:
+        if words[0] in {"1", "haan", "ha", "yes", "jodein", "start", "shuru", "theek", "ok"}:
+            return True
+        if words[0] in {"2", "nahi", "na", "no", "stop", "cancel"}:
+            return False
+
+    return None
+
+
 def extract_category_from_reply(text: str) -> Optional[tuple]:
     """Try to match a text reply to one of the known category IDs.
     Returns (category_id, category_label) or None."""
     text_lower = text.strip().lower()
+    # Normalize numbers: "1", "1.", "1)", "1 - food"
+    num_match = re.match(r"^([1-8])\b", text_lower)
+    if num_match:
+        idx = int(num_match.group(1)) - 1
+        if 0 <= idx < len(BUSINESS_CATEGORIES):
+            cat = BUSINESS_CATEGORIES[idx]
+            return (cat["id"], cat["title"])
+
     # Direct ID match (from button/list reply)
     for cat in BUSINESS_CATEGORIES:
         if text_lower == cat["id"]:
             return (cat["id"], cat["title"])
+
     # Fuzzy keyword match
     keyword_map = {
-        "food_chai":   ["food", "chai", "snack", "tiffin", "restaurant", "dhaba"],
-        "kirana":      ["kirana", "grocery", "ration", "general", "store"],
-        "kapda":       ["kapda", "textile", "cloth", "tailor", "fabric"],
-        "services":    ["service", "salon", "repair", "coaching", "beauty", "parlour"],
-        "vegetables":  ["sabzi", "vegetable", "fruit", "subzi"],
+        "food_chai":   ["food", "chai", "snack", "tiffin", "restaurant", "dhaba", "hotel", "canteen", "tea", "nashta", "mithai"],
+        "kirana":      ["kirana", "grocery", "ration", "general", "store", "dukaan", "provision"],
+        "kapda":       ["kapda", "textile", "cloth", "tailor", "fabric", "boutique", "garment", "saree"],
+        "services":    ["service", "salon", "repair", "coaching", "beauty", "parlour", "lodge", "mechanic"],
+        "vegetables":  ["sabzi", "vegetable", "fruit", "subzi", "bhaji", "fal"],
         "medicine":    ["medicine", "medical", "pharmacy", "clinic", "dawai"],
         "electronics": ["electronic", "mobile", "phone", "electrical", "hardware"],
         "other":       ["other", "aur", "different"],

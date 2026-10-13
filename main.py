@@ -56,6 +56,7 @@ from services.vendor_manager import (
     update_vendor_onboarding,
     extract_name_from_text,
     extract_category_from_reply,
+    check_consent_reply,
     list_vendors,
     BUSINESS_CATEGORIES,
     CATEGORY_ID_TO_LABEL,
@@ -183,9 +184,21 @@ def _send_category_list(sender: str) -> None:
         for cat in BUSINESS_CATEGORIES
     ]
     sections = [{"title": "Business Category", "rows": rows}]
+    body_text = (
+        "Apni business category chunein 👇\n\n"
+        "1️⃣ 🍵 Food & Chai\n"
+        "2️⃣ 🛍 Kirana / Grocery\n"
+        "3️⃣ 🧵 Kapda / Textile\n"
+        "4️⃣ 💈 Services\n"
+        "5️⃣ 🥦 Sabzi / Fruits\n"
+        "6️⃣ 💊 Medical / Pharmacy\n"
+        "7️⃣ 📱 Electronics\n"
+        "8️⃣ 📦 Other Business\n\n"
+        "_(List button tap karein ya 1 se 8 number reply karein)_"
+    )
     _send_safe_list(
         sender,
-        body="Apni business category chunein 👇",
+        body=body_text,
         button_label="Category Chunein",
         sections=sections,
         header="Business Category",
@@ -199,15 +212,9 @@ def _process_and_reply(sender: str, media_id: str) -> None:
         update_last_active(sender)
         state = vendor.get("state", STATE_ACTIVE)
 
-        # If vendor is not fully onboarded, guide them back
-        if state in (STATE_NEW, STATE_DECLINED):
+        # If vendor is not fully onboarded, send actual interactive buttons
+        if state in (STATE_NEW, STATE_DECLINED, STATE_AWAITING_CONSENT):
             _send_welcome_with_buttons(sender)
-            return
-        if state == STATE_AWAITING_CONSENT:
-            _send_safe_reply(
-                sender,
-                "🙏 Pehle neeche buttons mein se jawab dein — kya aap VyapaarSaathi se judna chahte hain?"
-            )
             return
         if state == STATE_AWAITING_NAME:
             _send_safe_reply(
@@ -284,13 +291,21 @@ def _handle_text_message(sender: str, text: str) -> None:
             _send_welcome_with_buttons(sender)
             return
 
-        # ── Awaiting consent — nudge to use buttons ───────────────────────────
+        # ── Awaiting consent ──────────────────────────────────────────────────
         if state == STATE_AWAITING_CONSENT:
-            _send_safe_reply(
-                sender,
-                "🙏 Neeche buttons tap karein:\n• ✅ Haan, Jodein!\n• ❌ Abhi Nahi"
-            )
-            return
+            consent = check_consent_reply(text)
+            if consent is True:
+                set_vendor_state(sender, STATE_AWAITING_NAME)
+                _send_safe_reply(sender, CONSENT_ACCEPTED_MESSAGE)
+                return
+            elif consent is False:
+                set_vendor_state(sender, STATE_DECLINED)
+                _send_safe_reply(sender, CONSENT_DECLINED_MESSAGE)
+                return
+            else:
+                # User typed something else (e.g. "Hi", "Hello") — send actual interactive buttons!
+                _send_welcome_with_buttons(sender)
+                return
 
         # ── Awaiting name ─────────────────────────────────────────────────────
         if state == STATE_AWAITING_NAME:
@@ -1002,8 +1017,15 @@ def admin_nudge_vendor(
     state = vendor.get("state", "new")
 
     if state == "awaiting_consent":
-        msg = f"Namaste {name}! 🙏 VyapaarSaathi se judne ke liye bas 'Haan' reply karein ya welcome message check karein."
-    elif state == "awaiting_name":
+        try:
+            _send_welcome_with_buttons(normalized)
+            client_ip = request.client.host if request.client else ""
+            log_admin_action(admin_user.get("username", "admin"), "NUDGE_VENDOR", {"phone": normalized, "action": "welcome_buttons"}, client_ip)
+            return {"status": "sent", "phone": normalized, "detail": "Sent welcome buttons"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to send buttons: {e}")
+
+    if state == "awaiting_name":
         msg = "Namaste! 🙏 Kripya apna shubh naam reply karein taaki hum aapka account setup kar sakein."
     elif state == "awaiting_category":
         msg = f"Namaste {name}! 🙏 Kripya batayein aap kis cheez ka vyapaar karte hain (jaise Kirana, Chai, Sabzi)."

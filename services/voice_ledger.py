@@ -776,7 +776,7 @@ def send_whatsapp_buttons(
             raise
         # Fallback: send as plain text with options listed
         fallback_text = body + "\n\n" + "\n".join(
-            f"• {b['title']}" for b in buttons
+            f"{i+1}️⃣ {b['title']}" for i, b in enumerate(buttons)
         )
         return send_whatsapp_reply(to_phone, fallback_text)
 
@@ -833,9 +833,11 @@ def send_whatsapp_list(
             raise
         # Fallback: send as plain text
         all_rows = []
+        row_num = 1
         for sec in sections:
             for row in sec.get("rows", []):
-                all_rows.append(f"• {row['title']}")
+                all_rows.append(f"{row_num}️⃣ {row['title']}")
+                row_num += 1
         fallback_text = body + "\n\n" + "\n".join(all_rows)
         return send_whatsapp_reply(to_phone, fallback_text)
 
