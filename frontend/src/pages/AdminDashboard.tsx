@@ -369,9 +369,11 @@ export default function AdminDashboard() {
   // Broadcast state
   const [broadcastTarget, setBroadcastTarget] = useState<string>("all");
   const [broadcastMode, setBroadcastMode] = useState<"text" | "image" | "document" | "template">("text");
+  const [mediaSource, setMediaSource] = useState<"file" | "url">("file");
   const [broadcastCustomPhone, setBroadcastCustomPhone] = useState("");
   const [broadcastMessage, setBroadcastMessage] = useState("");
   const [broadcastMediaUrl, setBroadcastMediaUrl] = useState("");
+  const [broadcastMediaId, setBroadcastMediaId] = useState("");
   const [broadcastFilename, setBroadcastFilename] = useState("");
   const [uploadingMedia, setUploadingMedia] = useState(false);
   const [broadcasting, setBroadcasting] = useState(false);
@@ -640,6 +642,10 @@ export default function AdminDashboard() {
 
       setBroadcastMediaUrl(data.url);
       setBroadcastFilename(data.filename);
+      if (data.media_id) {
+        setBroadcastMediaId(data.media_id);
+      }
+      setMediaSource("file");
       if (data.media_type === "image") {
         setBroadcastMode("image");
       } else {
@@ -680,6 +686,7 @@ export default function AdminDashboard() {
           template_name: "hello_world",
           message: broadcastMessage.trim(),
           media_url: (broadcastMode === "image" || broadcastMode === "document") ? broadcastMediaUrl.trim() : undefined,
+          media_id: (broadcastMode === "image" || broadcastMode === "document") && broadcastMediaId ? broadcastMediaId : undefined,
           media_type: broadcastMode === "image" ? "image" : broadcastMode === "document" ? "document" : undefined,
           filename: broadcastFilename.trim() || undefined,
         }),
@@ -1997,7 +2004,7 @@ export default function AdminDashboard() {
                 </div>
               </div>
 
-              <form onSubmit={handleBroadcastSubmit} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <form onSubmit={handleBroadcastSubmit} noValidate style={{ display: "flex", flexDirection: "column", gap: 14 }}>
                 <div>
                   <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#8B93A0", display: "block", marginBottom: 6 }}>
                     Target Audience
@@ -2075,39 +2082,70 @@ export default function AdminDashboard() {
                       )}
                     </div>
 
-                    {/* File Upload Drop Zone / Button */}
-                    <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                      <label
+                    {/* Case 1: File is already attached */}
+                    {broadcastMediaUrl ? (
+                      <div
                         style={{
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 6,
-                          padding: "7px 12px",
+                          padding: 12,
                           borderRadius: 6,
-                          border: "1px solid #1F242B",
                           background: "#111418",
-                          color: "#E6E8EB",
-                          fontSize: 12,
-                          fontWeight: 500,
-                          cursor: "pointer",
+                          border: "1px solid #1F242B",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 12,
                         }}
                       >
-                        <Upload size={13} style={{ color: "#F97316" }} />
-                        <span>Choose {broadcastMode === "image" ? "Photo" : "PDF"} from Computer</span>
-                        <input
-                          type="file"
-                          accept={broadcastMode === "image" ? "image/png,image/jpeg,image/webp,image/jpg" : "application/pdf,.pdf"}
-                          onChange={handleMediaUpload}
-                          style={{ display: "none" }}
-                        />
-                      </label>
+                        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+                          {broadcastMode === "image" ? (
+                            <img
+                              src={broadcastMediaUrl}
+                              alt="Attachment preview"
+                              style={{
+                                width: 48,
+                                height: 48,
+                                borderRadius: 5,
+                                objectFit: "cover",
+                                border: "1px solid #1F242B",
+                                background: "#0B0D10",
+                                flexShrink: 0,
+                              }}
+                            />
+                          ) : (
+                            <div
+                              style={{
+                                width: 44,
+                                height: 44,
+                                borderRadius: 5,
+                                background: "rgba(249,115,22,0.1)",
+                                border: "1px solid rgba(249,115,22,0.3)",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                color: "#F97316",
+                                flexShrink: 0,
+                              }}
+                            >
+                              <FileText size={20} />
+                            </div>
+                          )}
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#E6E8EB", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
+                              {broadcastFilename || (broadcastMode === "image" ? "Photo Attachment" : "Document Attachment")}
+                            </div>
+                            <div style={{ fontSize: 11, color: "#86efac", marginTop: 2, display: "flex", alignItems: "center", gap: 4 }}>
+                              <CheckCircle2 size={12} />
+                              <span>Attached and ready to broadcast</span>
+                            </div>
+                          </div>
+                        </div>
 
-                      {broadcastMediaUrl && (
                         <button
                           type="button"
                           onClick={() => {
                             setBroadcastMediaUrl("");
                             setBroadcastFilename("");
+                            setBroadcastMediaId("");
                           }}
                           style={{
                             display: "inline-flex",
@@ -2119,98 +2157,123 @@ export default function AdminDashboard() {
                             background: "transparent",
                             color: "#fca5a5",
                             fontSize: 11,
+                            fontWeight: 500,
                             cursor: "pointer",
+                            flexShrink: 0,
                           }}
                         >
                           <X size={12} />
-                          Remove Attachment
+                          Remove
                         </button>
-                      )}
-                    </div>
-
-                    {/* Preview box if file attached */}
-                    {broadcastMediaUrl && (
-                      <div
-                        style={{
-                          padding: "10px 12px",
-                          borderRadius: 6,
-                          background: "#111418",
-                          border: "1px solid #1F242B",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 12,
-                        }}
-                      >
-                        {broadcastMode === "image" ? (
-                          <img
-                            src={broadcastMediaUrl}
-                            alt="Attachment preview"
+                      </div>
+                    ) : (
+                      /* Case 2: No file attached yet - provide Upload or Link option */
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", gap: 6 }}>
+                          <button
+                            type="button"
+                            onClick={() => setMediaSource("file")}
                             style={{
-                              width: 48,
-                              height: 48,
+                              padding: "5px 10px",
                               borderRadius: 4,
-                              objectFit: "cover",
-                              border: "1px solid #1F242B",
-                              background: "#0B0D10",
-                            }}
-                          />
-                        ) : (
-                          <div
-                            style={{
-                              width: 40,
-                              height: 40,
-                              borderRadius: 4,
-                              background: "rgba(249,115,22,0.1)",
-                              border: "1px solid rgba(249,115,22,0.3)",
-                              display: "flex",
+                              border: `1px solid ${mediaSource === "file" ? "#F97316" : "#1F242B"}`,
+                              background: mediaSource === "file" ? "rgba(249,115,22,0.1)" : "transparent",
+                              color: mediaSource === "file" ? "#F97316" : "#8B93A0",
+                              fontSize: 11,
+                              fontWeight: 500,
+                              cursor: "pointer",
+                              display: "inline-flex",
                               alignItems: "center",
-                              justifyContent: "center",
-                              color: "#F97316",
+                              gap: 5,
                             }}
                           >
-                            <FileText size={18} />
+                            <Upload size={12} />
+                            Upload from Computer
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setMediaSource("url")}
+                            style={{
+                              padding: "5px 10px",
+                              borderRadius: 4,
+                              border: `1px solid ${mediaSource === "url" ? "#F97316" : "#1F242B"}`,
+                              background: mediaSource === "url" ? "rgba(249,115,22,0.1)" : "transparent",
+                              color: mediaSource === "url" ? "#F97316" : "#8B93A0",
+                              fontSize: 11,
+                              fontWeight: 500,
+                              cursor: "pointer",
+                              display: "inline-flex",
+                              alignItems: "center",
+                              gap: 5,
+                            }}
+                          >
+                            <Paperclip size={12} />
+                            Paste Web Link
+                          </button>
+                        </div>
+
+                        {mediaSource === "file" ? (
+                          <div>
+                            <label
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                gap: 8,
+                                padding: "14px 18px",
+                                borderRadius: 6,
+                                border: "1px dashed #2E3846",
+                                background: "#111418",
+                                color: "#E6E8EB",
+                                fontSize: 12,
+                                fontWeight: 500,
+                                cursor: uploadingMedia ? "wait" : "pointer",
+                              }}
+                            >
+                              <Upload size={14} style={{ color: "#F97316" }} />
+                              <span>
+                                {uploadingMedia
+                                  ? "Uploading file to server…"
+                                  : `Choose ${broadcastMode === "image" ? "Photo (PNG, JPG, WEBP)" : "PDF Document"} from Computer`}
+                              </span>
+                              <input
+                                type="file"
+                                disabled={uploadingMedia}
+                                accept={broadcastMode === "image" ? "image/png,image/jpeg,image/webp,image/jpg" : "application/pdf,.pdf"}
+                                onChange={handleMediaUpload}
+                                style={{ display: "none" }}
+                              />
+                            </label>
+                          </div>
+                        ) : (
+                          <div>
+                            <input
+                              type="text"
+                              value={broadcastMediaUrl}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                setBroadcastMediaUrl(val);
+                                if (!broadcastFilename && val) {
+                                  try {
+                                    const path = new URL(val).pathname;
+                                    setBroadcastFilename(path.split("/").pop() || "");
+                                  } catch {
+                                    // Ignore
+                                  }
+                                }
+                              }}
+                              placeholder={broadcastMode === "image" ? "https://example.com/poster.jpg" : "https://example.com/catalog.pdf"}
+                              style={{ ...S.input, ...S.mono, fontSize: 12 }}
+                            />
                           </div>
                         )}
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 12, fontWeight: 500, color: "#E6E8EB", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
-                            {broadcastFilename || "Attachment ready"}
-                          </div>
-                          <div style={{ fontSize: 11, color: "#8B93A0", marginTop: 2, ...S.mono, textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}>
-                            {broadcastMediaUrl}
-                          </div>
-                        </div>
                       </div>
                     )}
-
-                    {/* Direct URL input alternative */}
-                    <div>
-                      <label style={{ fontSize: 11, color: "#8B93A0", display: "block", marginBottom: 4 }}>
-                        Or enter public link (HTTPS):
-                      </label>
-                      <input
-                        type="url"
-                        value={broadcastMediaUrl}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setBroadcastMediaUrl(val);
-                          if (!broadcastFilename && val) {
-                            try {
-                              const path = new URL(val).pathname;
-                              setBroadcastFilename(path.split("/").pop() || "");
-                            } catch {
-                              // Ignore invalid URL parse
-                            }
-                          }
-                        }}
-                        placeholder={broadcastMode === "image" ? "https://example.com/poster.jpg" : "https://example.com/catalog.pdf"}
-                        style={{ ...S.input, ...S.mono, fontSize: 12 }}
-                      />
-                    </div>
 
                     {broadcastMode === "document" && (
                       <div>
                         <label style={{ fontSize: 11, color: "#8B93A0", display: "block", marginBottom: 4 }}>
-                          Document Filename on WhatsApp (e.g. Catalog.pdf):
+                          Document Filename shown on WhatsApp:
                         </label>
                         <input
                           type="text"

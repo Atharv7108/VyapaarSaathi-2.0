@@ -563,12 +563,32 @@ def _handle_meta_response(response: requests.Response, recipient: str) -> Dict[s
     return response.json()
 
 
+def upload_whatsapp_media(file_bytes: bytes, filename: str, mime_type: str) -> Optional[str]:
+    """Uploads media binary directly to Meta Cloud API and returns the media ID."""
+    try:
+        settings = get_settings()
+        url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/media"
+        headers = {"Authorization": f"Bearer {settings.whatsapp_api_token}"}
+        files = {"file": (filename, file_bytes, mime_type)}
+        data = {"messaging_product": "whatsapp", "type": mime_type}
+        resp = requests.post(url, headers=headers, files=files, data=data, timeout=30)
+        resp_data = resp.json()
+        if resp.status_code == 200 and "id" in resp_data:
+            logger.info("Uploaded media to Meta: id=%s (%s)", resp_data["id"], filename)
+            return str(resp_data["id"])
+        logger.warning("Meta media upload non-200: %s %s", resp.status_code, resp.text)
+    except Exception as e:
+        logger.warning("upload_whatsapp_media failed: %s", e)
+    return None
+
+
 def send_whatsapp_reply(
     to_phone: str,
     body: str,
     media_url: Optional[str] = None,
     media_type: Optional[str] = None,
     filename: Optional[str] = None,
+    media_id: Optional[str] = None,
 ) -> str:
     settings = get_settings()
 
@@ -580,19 +600,34 @@ def send_whatsapp_reply(
     
     recipient = to_phone.replace("whatsapp:", "").replace("+", "")
     
-    if media_url:
-        clean_url = media_url.split("?")[0].lower()
+    # If media_url points to a local file and we don't have a media_id yet, upload directly to Meta
+    if not media_id and media_url and not (media_url.startswith("http://") or media_url.startswith("https://")):
+        local_rel = media_url.lstrip("/")
+        if os.path.exists(local_rel):
+            try:
+                with open(local_rel, "rb") as f:
+                    content_bytes = f.read()
+                clean_name = filename or os.path.basename(local_rel)
+                clean_ext = os.path.splitext(clean_name)[1].lower()
+                mime = (
+                    "image/png" if clean_ext == ".png"
+                    else "image/jpeg" if clean_ext in [".jpg", ".jpeg"]
+                    else "image/webp" if clean_ext == ".webp"
+                    else "application/pdf" if clean_ext == ".pdf"
+                    else "application/octet-stream"
+                )
+                media_id = upload_whatsapp_media(content_bytes, clean_name, mime)
+            except Exception as read_err:
+                logger.warning("Could not upload local media %s to Meta: %s", local_rel, read_err)
+
+    if media_id:
+        clean_name = filename or "attachment"
         is_image = (
             media_type == "image"
-            or clean_url.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+            or clean_name.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
         )
-        is_doc = (
-            media_type == "document"
-            or clean_url.endswith((".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt"))
-        )
-
         if is_image:
-            image_obj: Dict[str, Any] = {"link": media_url}
+            image_obj: Dict[str, Any] = {"id": media_id}
             if body:
                 image_obj["caption"] = body
             payload: Dict[str, Any] = {
@@ -603,7 +638,38 @@ def send_whatsapp_reply(
                 "image": image_obj,
             }
         else:
-            doc_obj: Dict[str, Any] = {"link": media_url}
+            doc_obj: Dict[str, Any] = {"id": media_id}
+            if body:
+                doc_obj["caption"] = body
+            if filename:
+                doc_obj["filename"] = filename
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": recipient,
+                "type": "document",
+                "document": doc_obj,
+            }
+    elif media_url:
+        clean_url = media_url.split("?")[0].lower()
+        is_image = (
+            media_type == "image"
+            or clean_url.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))
+        )
+
+        if is_image:
+            image_obj = {"link": media_url}
+            if body:
+                image_obj["caption"] = body
+            payload = {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": recipient,
+                "type": "image",
+                "image": image_obj,
+            }
+        else:
+            doc_obj = {"link": media_url}
             if body:
                 doc_obj["caption"] = body
             clean_name = filename or os.path.basename(clean_url) or "document.pdf"
@@ -625,7 +691,7 @@ def send_whatsapp_reply(
         }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
         data = _handle_meta_response(response, recipient)
         return data.get("messages", [{}])[0].get("id", "")
     except Exception as exc:

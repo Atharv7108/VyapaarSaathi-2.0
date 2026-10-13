@@ -732,6 +732,7 @@ class AdminBroadcastRequest(BaseModel):
     template_name: Optional[str] = "hello_world"
     custom_phone: Optional[str] = None
     media_url: Optional[str] = None
+    media_id: Optional[str] = None
     media_type: Optional[str] = None  # "image" or "document"
     filename: Optional[str] = None
 
@@ -1149,10 +1150,19 @@ async def admin_upload_media(
     rel_url = f"/static/broadcasts/{safe_name}"
     abs_url = _make_absolute_url(rel_url, request)
 
+    meta_media_id = None
+    try:
+        from services.voice_ledger import upload_whatsapp_media
+        mime = content_type or ("image/png" if media_type == "image" else "application/pdf")
+        meta_media_id = upload_whatsapp_media(contents, orig_name, mime)
+    except Exception as exc:
+        logger.warning("Meta media direct upload exception: %s", exc)
+
     return {
         "status": "uploaded",
         "url": rel_url,
         "abs_url": abs_url,
+        "media_id": meta_media_id,
         "filename": orig_name,
         "media_type": media_type,
         "size_bytes": len(contents),
@@ -1220,6 +1230,7 @@ def admin_broadcast(
                     media_url=media_url,
                     media_type=data.media_type,
                     filename=data.filename,
+                    media_id=data.media_id,
                 )
             sent_list.append({"phone": phone, "name": v_name, "message_id": msg_id})
         except Exception as e:
