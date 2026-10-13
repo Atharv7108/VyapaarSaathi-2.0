@@ -101,14 +101,6 @@ export default function Ledger() {
             <Download className="w-3.5 h-3.5 text-orange-500" />
             <span>{isHindi ? "रिपोर्ट डाउनलोड (PDF)" : "Export PDF Report"}</span>
           </button>
-          <button
-            type="button"
-            onClick={() => navigate("/app/record")}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white text-xs font-black shadow-md shadow-orange-500/25 transition"
-          >
-            <Mic className="w-3.5 h-3.5" />
-            <span>{isHindi ? "+ नई एंट्री बोलें" : "+ Record New Entry"}</span>
-          </button>
         </div>
       </div>
 

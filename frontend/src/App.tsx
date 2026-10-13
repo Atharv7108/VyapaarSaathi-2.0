@@ -46,7 +46,7 @@ export default function App() {
         >
           <Route index element={<Home />} />
           <Route path="ledger"    element={<Ledger />} />
-          <Route path="record"    element={<Record />} />
+          <Route path="record"    element={<Navigate to="/app/ledger" replace />} />
           <Route path="insights"  element={<Insights />} />
           <Route path="inventory" element={<Inventory />} />
           <Route path="profile"   element={<Profile />} />

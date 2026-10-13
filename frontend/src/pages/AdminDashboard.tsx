@@ -325,7 +325,7 @@ export default function AdminDashboard() {
   const navigate = useNavigate();
   const { logout, adminToken } = useStore();
 
-  const [activeTab, setActiveTab] = useState<"overview" | "vendors" | "funnel" | "broadcast" | "audit" | "system">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "vendors" | "funnel" | "broadcast" | "system">("overview");
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [stats, setStats] = useState<AdminStats | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -404,12 +404,6 @@ export default function AdminDashboard() {
   useEffect(() => {
     loadAllData();
   }, []);
-
-  useEffect(() => {
-    if (activeTab === "audit") {
-      fetchAuditLogs();
-    }
-  }, [activeTab]);
 
   async function loadAllData() {
     fetchStats(chartVendor);
@@ -764,7 +758,6 @@ export default function AdminDashboard() {
     { id: "vendors",   label: `Merchants (${vendors.length})`, icon: Users },
     { id: "funnel",    label: "Funnel",                     icon: MessageSquare },
     { id: "broadcast", label: "Broadcast",                  icon: Send },
-    { id: "audit",     label: "Audit Trail",                icon: ShieldCheck },
     { id: "system",    label: "System",                     icon: Server },
   ] as const;
 
@@ -776,38 +769,46 @@ export default function AdminDashboard() {
       color: "#E6E8EB",
       fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
       fontFeatureSettings: "'cv02', 'cv03', 'cv04', 'cv11'",
+      display: "flex",
     } as React.CSSProperties,
-    header: {
+    sidebar: {
+      width: 240,
+      minWidth: 240,
       background: "#111418",
-      borderBottom: "1px solid #1F242B",
+      borderRight: "1px solid #1F242B",
+      display: "flex",
+      flexDirection: "column",
+      height: "100vh",
       position: "sticky" as const,
       top: 0,
-      zIndex: 30,
-    },
-    navInner: {
-      maxWidth: 1280,
-      margin: "0 auto",
-      padding: "0 24px",
+      zIndex: 40,
+      flexShrink: 0,
+    } as React.CSSProperties,
+    mainWrapper: {
+      flex: 1,
+      minWidth: 0,
+      display: "flex",
+      flexDirection: "column",
+      minHeight: "100vh",
+      background: "#0B0D10",
+    } as React.CSSProperties,
+    topBar: {
+      height: 52,
+      background: "#111418",
+      borderBottom: "1px solid #1F242B",
+      padding: "0 28px",
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
-      height: 54,
-    },
-    tabBar: {
-      maxWidth: 1280,
-      margin: "0 auto",
-      padding: "0 24px",
-      display: "flex",
-      alignItems: "center",
-      gap: 4,
-      borderTop: "1px solid #1F242B",
-      overflowX: "auto" as const,
-    },
+      position: "sticky" as const,
+      top: 0,
+      zIndex: 30,
+    } as React.CSSProperties,
     main: {
-      maxWidth: 1280,
-      margin: "0 auto",
-      padding: "24px",
-    },
+      flex: 1,
+      padding: "24px 28px",
+      width: "100%",
+    } as React.CSSProperties,
     card: {
       background: "#111418",
       border: "1px solid #1F242B",
@@ -942,94 +943,37 @@ export default function AdminDashboard() {
         button:disabled { opacity: 0.45 !important; cursor: not-allowed !important; }
       `}</style>
 
-      {/* ── TOP HEADER (Flat, Clean Internal Tool) ────────────────────── */}
-      <header style={S.header}>
-        <div style={S.navInner}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <div
-              style={{
-                width: 26,
-                height: 26,
-                borderRadius: 6,
-                background: "#F97316",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                flexShrink: 0,
-              }}
-            >
-              <span style={{ fontWeight: 700, color: "#FFFFFF", fontSize: 11, letterSpacing: "-0.02em" }}>VS</span>
-            </div>
-            <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-              <span style={{ fontSize: 14, fontWeight: 600, color: "#E6E8EB", letterSpacing: "-0.01em" }}>
-                VyapaarSaathi
-              </span>
-              <span style={{ fontSize: 12, color: "#8B93A0" }}>/</span>
-              <span style={{ fontSize: 12, color: "#8B93A0" }}>Internal Admin</span>
-            </div>
+      {/* ── LEFT SIDEBAR (Linear / Stripe Style) ─────────────────────────── */}
+      <aside style={S.sidebar}>
+        {/* Brand */}
+        <div style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid #1F242B" }}>
+          <div
+            style={{
+              width: 30,
+              height: 30,
+              borderRadius: 6,
+              background: "#F97316",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ fontWeight: 700, color: "#FFFFFF", fontSize: 13, letterSpacing: "-0.02em" }}>VS</span>
           </div>
-
-          {/* Account & Global Actions */}
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            {/* User identification */}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "4px 8px",
-                borderRadius: 6,
-                border: "1px solid #1F242B",
-                background: "#0B0D10",
-              }}
-            >
-              <div
-                style={{
-                  width: 20,
-                  height: 20,
-                  borderRadius: "50%",
-                  background: "#1F242B",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                }}
-              >
-                <UserIcon size={12} style={{ color: "#8B93A0" }} />
-              </div>
-              <span style={{ fontSize: 12, color: "#E6E8EB", fontWeight: 500 }}>
-                admin@vyapaarsaathi.internal
-              </span>
-            </div>
-
-            <button
-              onClick={loadAllData}
-              style={S.btnGhost}
-              title="Refresh all metrics"
-            >
-              <RefreshCw
-                size={13}
-                style={{ animation: (loading || statsLoading) ? "spin 1s linear infinite" : "none" }}
-              />
-              <span className="hidden sm:inline">Refresh</span>
-            </button>
-
-            <button
-              onClick={handleLogout}
-              style={{
-                ...S.btnGhost,
-                borderColor: "rgba(239, 68, 68, 0.25)",
-                color: "#F87171",
-              }}
-              title="Log out"
-            >
-              <LogOut size={13} />
-              <span className="hidden sm:inline">Log out</span>
-            </button>
+          <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
+            <span style={{ fontSize: 14, fontWeight: 600, color: "#E6E8EB", letterSpacing: "-0.01em", lineHeight: 1.2 }}>
+              VyapaarSaathi
+            </span>
+            <span style={{ fontSize: 11, color: "#8B93A0" }}>Internal Admin</span>
           </div>
         </div>
 
-        {/* ── PLAIN TEXT UNDERLINE TABS ─────────────────────────────── */}
-        <div style={S.tabBar}>
+        {/* Navigation Items */}
+        <div style={{ padding: "16px 12px", display: "flex", flexDirection: "column", gap: 4, flex: 1, overflowY: "auto" }}>
+          <div style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#8B93A0", padding: "0 8px 8px" }}>
+            Platform
+          </div>
           {TABS.map((tab) => {
             const Icon = tab.icon;
             const active = activeTab === tab.id;
@@ -1041,31 +985,135 @@ export default function AdminDashboard() {
                 style={{
                   display: "flex",
                   alignItems: "center",
-                  gap: 6,
-                  padding: "10px 14px",
-                  background: "transparent",
-                  border: "none",
-                  borderBottom: active ? "2px solid #F97316" : "2px solid transparent",
+                  gap: 10,
+                  padding: "9px 12px",
+                  borderRadius: 6,
+                  background: active ? "rgba(249, 115, 22, 0.08)" : "transparent",
+                  border: `1px solid ${active ? "rgba(249, 115, 22, 0.3)" : "transparent"}`,
                   color: active ? "#F97316" : "#8B93A0",
                   fontSize: 13,
-                  fontWeight: active ? 600 : 400,
+                  fontWeight: active ? 600 : 500,
                   cursor: "pointer",
-                  whiteSpace: "nowrap",
+                  width: "100%",
+                  textAlign: "left",
                   fontFamily: "inherit",
-                  marginBottom: -1,
-                  transition: "color 0.15s, border-color 0.15s",
+                  transition: "all 0.15s",
                 }}
               >
-                <Icon size={14} style={{ color: active ? "#F97316" : "#8B93A0" }} />
-                {tab.label}
+                <Icon size={15} style={{ color: active ? "#F97316" : "#8B93A0", flexShrink: 0 }} />
+                <span style={{ flex: 1 }}>{tab.label}</span>
+                {tab.id === "vendors" && (
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontVariantNumeric: "tabular-nums",
+                      padding: "1px 6px",
+                      borderRadius: 4,
+                      background: active ? "rgba(249, 115, 22, 0.15)" : "#1F242B",
+                      color: active ? "#F97316" : "#8B93A0",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {vendors.length}
+                  </span>
+                )}
               </button>
             );
           })}
         </div>
-      </header>
 
-      {/* ── MAIN CONTENT ──────────────────────────────────────────────── */}
-      <main style={S.main}>
+        {/* Bottom Footer: Account, Refresh, Logout */}
+        <div style={{ padding: "14px 14px", borderTop: "1px solid #1F242B", display: "flex", flexDirection: "column", gap: 10 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "6px 8px",
+              borderRadius: 6,
+              background: "#0B0D10",
+              border: "1px solid #1F242B",
+            }}
+          >
+            <div
+              style={{
+                width: 22,
+                height: 22,
+                borderRadius: "50%",
+                background: "#1F242B",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                flexShrink: 0,
+              }}
+            >
+              <UserIcon size={12} style={{ color: "#8B93A0" }} />
+            </div>
+            <div style={{ fontSize: 11, color: "#E6E8EB", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              admin@vyapaarsaathi.internal
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <button
+              onClick={loadAllData}
+              style={{
+                ...S.btnGhost,
+                flex: 1,
+                justifyContent: "center",
+                padding: "7px 10px",
+                fontSize: 12,
+              }}
+              title="Refresh all metrics"
+            >
+              <RefreshCw
+                size={12}
+                style={{ animation: (loading || statsLoading) ? "spin 1s linear infinite" : "none" }}
+              />
+              <span>Refresh</span>
+            </button>
+
+            <button
+              onClick={handleLogout}
+              style={{
+                ...S.btnGhost,
+                flex: 1,
+                justifyContent: "center",
+                padding: "7px 10px",
+                borderColor: "rgba(239, 68, 68, 0.25)",
+                color: "#F87171",
+                fontSize: 12,
+              }}
+              title="Log out"
+            >
+              <LogOut size={12} />
+              <span>Log out</span>
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* ── MAIN CONTENT WRAPPER ──────────────────────────────────────── */}
+      <div style={S.mainWrapper}>
+        <header style={S.topBar}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 15, fontWeight: 600, color: "#E6E8EB", letterSpacing: "-0.01em" }}>
+              {TABS.find((t) => t.id === activeTab)?.label || "Dashboard"}
+            </span>
+            <span style={{ fontSize: 12, color: "#8B93A0" }}>•</span>
+            <span style={{ fontSize: 12, color: "#8B93A0" }}>VyapaarSaathi Production</span>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 11, color: "#86efac", display: "inline-flex", alignItems: "center", gap: 5, background: "rgba(34,197,94,0.08)", border: "1px solid rgba(34,197,94,0.2)", padding: "3px 8px", borderRadius: 4 }}>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#22c55e" }} />
+              Live System
+            </span>
+          </div>
+        </header>
+
+        {/* ── MAIN VIEWPORT ──────────────────────────────────────────── */}
+        <main style={S.main}>
         {/* Toast */}
         {toast && (
           <div
@@ -1933,7 +1981,7 @@ export default function AdminDashboard() {
             TAB 4: BROADCAST HUB
         ════════════════════════════════════════════════════════════════ */}
         {activeTab === "broadcast" && (
-          <div style={{ maxWidth: 640, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(460px, 1fr))", gap: 20, alignItems: "start" }}>
             <div style={S.card}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
                 <div
@@ -2406,126 +2454,49 @@ export default function AdminDashboard() {
                 </div>
               )}
             </div>
-          </div>
-        )}
 
-        {/* ════════════════════════════════════════════════════════════════
-            TAB 5: SECURITY AUDIT TRAIL
-        ════════════════════════════════════════════════════════════════ */}
-        {activeTab === "audit" && (
-          <div style={S.cardNoPadding}>
-            <div
-              style={{
-                padding: "14px 20px",
-                borderBottom: "1px solid #1F242B",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <div>
-                <div style={{ fontSize: 14, fontWeight: 600, color: "#E6E8EB" }}>
-                  Administrative Security Audit Trail
+            {/* Broadcast Operations & Target Scope Panel */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <div style={S.card}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "#E6E8EB", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                  <Send size={14} style={{ color: "#F97316" }} />
+                  Audience Scope & Delivery Target
                 </div>
-                <div style={{ fontSize: 12, color: "#8B93A0", marginTop: 2 }}>
-                  Immutable log of administrative logins, deletions, activations, and broadcasts
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, fontSize: 12, color: "#8B93A0" }}>
+                  <div style={{ padding: 12, borderRadius: 6, background: "#0B0D10", border: "1px solid #1F242B" }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "#E6E8EB", marginBottom: 6 }}>
+                      Registered Merchant Breakdown
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12 }}>
+                      <span>Total Registered Vendors:</span>
+                      <span style={{ fontWeight: 600, color: "#E6E8EB", ...S.mono }}>{vendors.length}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12 }}>
+                      <span>Active Merchants:</span>
+                      <span style={{ fontWeight: 600, color: "#86efac", ...S.mono }}>{vendors.filter(v => v.state === "active").length}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 12 }}>
+                      <span>Pending Onboarding:</span>
+                      <span style={{ fontWeight: 600, color: "#fcd34d", ...S.mono }}>{vendors.filter(v => v.state !== "active").length}</span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, lineHeight: 1.5 }}>
+                    <div>• <b>Direct Media Dispatch:</b> Photos and PDFs are uploaded straight to Meta WhatsApp servers via Cloud API.</div>
+                    <div>• <b>24-Hour Customer Window:</b> Custom text, photo, and PDF messages deliver to merchants active in the last 24h.</div>
+                    <div>• <b>Meta Template:</b> Use the pre-approved Meta Template (hello_world) to re-engage merchants outside the 24h window.</div>
+                  </div>
                 </div>
               </div>
-              <button onClick={fetchAuditLogs} style={S.btnSecondary}>
-                <RefreshCw size={12} style={{ animation: auditLoading ? "spin 1s linear infinite" : "none" }} />
-                Refresh
-              </button>
             </div>
-
-            {auditLoading ? (
-              <div style={{ padding: 40, display: "flex", flexDirection: "column", gap: 10 }}>
-                <Skeleton height={24} />
-                <Skeleton height={24} />
-                <Skeleton height={24} />
-              </div>
-            ) : auditLogs.length === 0 ? (
-              <div style={{ padding: 50, textAlign: "center", color: "#8B93A0", fontSize: 13 }}>
-                No audit events recorded yet.
-              </div>
-            ) : (
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", textAlign: "left" }}>
-                  <thead>
-                    <tr>
-                      <th style={S.th}>Timestamp</th>
-                      <th style={S.th}>Admin</th>
-                      <th style={S.th}>Action</th>
-                      <th style={S.th}>Details</th>
-                      <th style={S.th}>IP</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {auditLogs.map((log, i) => (
-                      <tr key={i} className="row-hover">
-                        <td style={{ ...S.td, fontSize: 12, color: "#8B93A0", ...S.mono }}>
-                          {formatDate(log.timestamp)}
-                        </td>
-                        <td style={{ ...S.td, fontWeight: 500 }}>{log.admin}</td>
-                        <td style={S.td}>
-                          <span
-                            style={{
-                              fontSize: 11,
-                              fontWeight: 600,
-                              padding: "2px 6px",
-                              borderRadius: 4,
-                              background: log.action.includes("DELETE")
-                                ? "rgba(239,68,68,0.08)"
-                                : log.action.includes("LOGIN")
-                                ? "rgba(34,197,94,0.08)"
-                                : "rgba(96,165,250,0.08)",
-                              color: log.action.includes("DELETE")
-                                ? "#fca5a5"
-                                : log.action.includes("LOGIN")
-                                ? "#86efac"
-                                : "#93c5fd",
-                              border: `1px solid ${
-                                log.action.includes("DELETE")
-                                  ? "rgba(239,68,68,0.2)"
-                                  : log.action.includes("LOGIN")
-                                  ? "rgba(34,197,94,0.2)"
-                                  : "rgba(96,165,250,0.2)"
-                              }`,
-                              ...S.mono,
-                            }}
-                          >
-                            {log.action}
-                          </span>
-                        </td>
-                        <td
-                          style={{
-                            ...S.td,
-                            fontSize: 12,
-                            color: "#8B93A0",
-                            maxWidth: 320,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {JSON.stringify(log.details)}
-                        </td>
-                        <td style={{ ...S.td, fontSize: 12, color: "#8B93A0", ...S.mono }}>
-                          {log.ip || "127.0.0.1"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </div>
         )}
 
         {/* ════════════════════════════════════════════════════════════════
-            TAB 6: SYSTEM HEALTH
+            TAB 5: SYSTEM HEALTH
         ════════════════════════════════════════════════════════════════ */}
         {activeTab === "system" && (
-          <div style={{ maxWidth: 640, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(440px, 1fr))", gap: 20 }}>
             <div style={S.card}>
               <div style={{ fontSize: 14, fontWeight: 600, color: "#E6E8EB", marginBottom: 2 }}>
                 Infrastructure & Integrations
@@ -2537,7 +2508,7 @@ export default function AdminDashboard() {
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {[
                   { name: "FastAPI Backend", desc: "Port 8000 · Uvicorn ASGI · JWT Middleware", status: "Online" },
-                  { name: "MongoDB Database", desc: "vendors, ledger, inventory, audit_logs", status: "Connected" },
+                  { name: "MongoDB Database", desc: "vendors, ledger, inventory scoping", status: "Connected" },
                   { name: "Meta WhatsApp Cloud API", desc: "Interactive buttons & voice webhook active", status: "Active" },
                   { name: "Groq Whisper & AI Pipeline", desc: "Speech-to-text & JSON intent categorization", status: "Ready" },
                 ].map((s) => (
@@ -2578,9 +2549,44 @@ export default function AdminDashboard() {
                 ))}
               </div>
             </div>
+
+            <div style={S.card}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: "#E6E8EB", marginBottom: 2 }}>
+                Platform Metrics & Environment
+              </div>
+              <div style={{ fontSize: 12, color: "#8B93A0", marginBottom: 16 }}>
+                Platform configuration and operational health
+              </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {[
+                  { label: "Environment Mode", value: "Production Sandbox (Meta Cloud API)" },
+                  { label: "Token Status", value: "Active & Verified" },
+                  { label: "Total Registered Merchants", value: `${vendors.length} vendors in DB` },
+                  { label: "Active Ledgers", value: `${stats?.total_entries ?? 0} total entries recorded` },
+                ].map((item, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      padding: "12px 14px",
+                      borderRadius: 6,
+                      border: "1px solid #1F242B",
+                      background: "#0B0D10",
+                    }}
+                  >
+                    <span style={{ fontSize: 12, color: "#8B93A0" }}>{item.label}</span>
+                    <span style={{ fontSize: 12, fontWeight: 500, color: "#E6E8EB" }}>{item.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </main>
+    </div>
 
       {/* ── DETAIL DRAWER (1px Left Border, Flat Surface #111418) ──────── */}
       {selectedVendorPhone && (

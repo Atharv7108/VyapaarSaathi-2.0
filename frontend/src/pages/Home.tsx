@@ -253,32 +253,32 @@ export default function Home() {
 
         {/* Quick Action Side Panel */}
         <div className="flex flex-col gap-3">
-          {/* Primary Voice CTA Card */}
+          {/* Primary Quick CTA Card */}
           <div
-            onClick={() => navigate("/app/record")}
+            onClick={() => navigate("/app/ledger")}
             className="group relative overflow-hidden rounded-3xl bg-gradient-to-br from-orange-500 via-orange-600 to-amber-600 p-6 text-white shadow-lg shadow-orange-500/25 cursor-pointer hover:shadow-xl hover:shadow-orange-500/35 transition-all duration-300 hover:-translate-y-0.5 flex-1 flex flex-col justify-between"
           >
             <div>
               <div className="flex items-center justify-between">
                 <span className="inline-block bg-white/20 text-white text-[11px] font-black px-2.5 py-1 rounded-full uppercase tracking-wider">
-                  🎙️ {isHindi ? "सिर्फ बोलो" : "Voice First"}
+                  📊 {isHindi ? "डिजिटल खाता" : "Digital Khata"}
                 </span>
                 <div className="w-10 h-10 rounded-2xl bg-white/20 flex items-center justify-center group-hover:scale-110 transition-transform">
-                  <Mic className="w-5 h-5" />
+                  <BookOpen className="w-5 h-5" />
                 </div>
               </div>
               <h3 className="mt-4 text-xl font-black leading-tight">
-                {isHindi ? "बोलकर हिसाब लिखें" : "Record by Voice"}
+                {isHindi ? "दैनिक खाता और बिक्री" : "Digital Ledger & Sales"}
               </h3>
               <p className="mt-1.5 text-xs text-orange-100 leading-relaxed">
                 {isHindi
-                  ? "टैप करें और बोलें — AI तुरंत खाता में दर्ज कर देगा।"
-                  : "Tap & speak your sales — AI records it automatically."}
+                  ? "अपनी सभी दैनिक बिक्री, खर्चे और मुनाफा देखें।"
+                  : "View and manage all your daily sales, expenses, and profits."}
               </p>
             </div>
 
             <div className="mt-6 flex items-center justify-between pt-4 border-t border-white/20">
-              <span className="text-xs font-bold">{isHindi ? "अभी रिकॉर्ड करें →" : "Start Speaking →"}</span>
+              <span className="text-xs font-bold">{isHindi ? "खाता खोलें →" : "Open Ledger →"}</span>
               <div className="flex items-center gap-1">
                 {[1, 2, 3].map(i => (
                   <span key={i} className={`w-1 bg-white rounded-full ${i === 1 ? "h-3" : i === 2 ? "h-5" : "h-2"}`} />
@@ -439,10 +439,10 @@ export default function Home() {
                     {isHindi ? "अभी तक कोई प्रविष्टि नहीं है।" : "No transactions recorded yet."}
                   </p>
                   <button
-                    onClick={() => navigate("/app/record")}
+                    onClick={() => navigate("/app/ledger")}
                     className="mt-3 px-4 py-1.5 rounded-full bg-slate-900 text-white text-xs font-bold hover:bg-slate-800 transition"
                   >
-                    {isHindi ? "पहली एंट्री बोलें" : "Record First Entry"}
+                    {isHindi ? "खाता बही देखें" : "View Ledger"}
                   </button>
                 </div>
               ) : (
