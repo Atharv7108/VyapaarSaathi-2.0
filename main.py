@@ -82,6 +82,14 @@ from services.inventory import (
     reset_daily_stock,
     get_item_stats_from_ledger,
 )
+from services.udhari import (
+    add_udhari,
+    record_payment as record_udhari_payment,
+    list_customers,
+    get_customer_summary,
+    get_customer_transactions,
+    get_udhari_totals,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -2105,3 +2113,115 @@ async def global_exception_handler(_: Request, exc: Exception) -> JSONResponse:
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Internal server error"},
     )
+
+
+# ---------------------------------------------------------------------------
+# Udhari (Customer Credit / Khata) REST endpoints
+# ---------------------------------------------------------------------------
+
+class UdhariAddIn(BaseModel):
+    vendor_phone: str
+    customer_name: str
+    amount: float
+    note: str = ""
+
+
+class UdhariPaymentIn(BaseModel):
+    vendor_phone: str
+    customer_name: str
+    amount: float
+    note: str = ""
+
+
+@app.get("/udhari/totals")
+def get_udhari_totals_endpoint(vendor_phone: str = "") -> Dict[str, Any]:
+    """KPI summary: total outstanding, active customers, totals given / recovered."""
+    if not vendor_phone.strip():
+        raise HTTPException(status_code=400, detail="vendor_phone is required")
+    try:
+        return get_udhari_totals(vendor_phone.strip())
+    except Exception as exc:
+        logger.exception("/udhari/totals failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/udhari/customers")
+def list_udhari_customers(
+    vendor_phone: str = "",
+    only_outstanding: bool = False,
+    search: str = "",
+) -> Dict[str, Any]:
+    """List all customer khata records for a vendor."""
+    if not vendor_phone.strip():
+        raise HTTPException(status_code=400, detail="vendor_phone is required")
+    try:
+        customers = list_customers(
+            vendor_phone=vendor_phone.strip(),
+            only_outstanding=only_outstanding,
+            search=search,
+        )
+        return {"customers": customers}
+    except Exception as exc:
+        logger.exception("/udhari/customers failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/udhari/add")
+def add_udhari_endpoint(body: UdhariAddIn) -> Dict[str, Any]:
+    """Record new credit given to a customer."""
+    try:
+        summary = add_udhari(
+            vendor_phone=body.vendor_phone.strip(),
+            customer_name=body.customer_name.strip(),
+            amount=body.amount,
+            note=body.note,
+        )
+        return {"success": True, "customer": summary}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("/udhari/add failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/udhari/payment")
+def record_payment_endpoint(body: UdhariPaymentIn) -> Dict[str, Any]:
+    """Record payment received from a customer."""
+    try:
+        summary = record_udhari_payment(
+            vendor_phone=body.vendor_phone.strip(),
+            customer_name=body.customer_name.strip(),
+            amount=body.amount,
+            note=body.note,
+        )
+        return {"success": True, "customer": summary}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("/udhari/payment failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/udhari/transactions")
+def get_udhari_transactions(
+    vendor_phone: str = "",
+    customer_name: str = "",
+    limit: int = 50,
+) -> Dict[str, Any]:
+    """Get transaction history for a single customer."""
+    if not vendor_phone.strip() or not customer_name.strip():
+        raise HTTPException(status_code=400, detail="vendor_phone and customer_name are required")
+    try:
+        txns = get_customer_transactions(
+            vendor_phone=vendor_phone.strip(),
+            customer_name=customer_name.strip(),
+            limit=limit,
+        )
+        summary = get_customer_summary(
+            vendor_phone=vendor_phone.strip(),
+            customer_name=customer_name.strip(),
+        )
+        return {"customer": summary, "transactions": txns}
+    except Exception as exc:
+        logger.exception("/udhari/transactions failed: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))

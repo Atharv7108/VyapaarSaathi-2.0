@@ -13,6 +13,7 @@ import Insights from "./pages/Insights";
 import Profile from "./pages/Profile";
 import Onboarding from "./pages/Onboarding";
 import Inventory from "./pages/Inventory";
+import Udhari from "./pages/Udhari";
 
 export default function App() {
   const { hasOnboarded } = useStore();
@@ -49,6 +50,7 @@ export default function App() {
           <Route path="record"    element={<Navigate to="/app/ledger" replace />} />
           <Route path="insights"  element={<Insights />} />
           <Route path="inventory" element={<Inventory />} />
+          <Route path="udhari"    element={<Udhari />} />
           <Route path="profile"   element={<Profile />} />
           <Route path="*"         element={<Navigate to="/app" replace />} />
         </Route>

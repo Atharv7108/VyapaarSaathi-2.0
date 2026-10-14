@@ -45,7 +45,7 @@ _stock_alert_state: Dict[str, str] = {}
 
 
 class ExtractedEntry(BaseModel):
-    intent: Literal["ADD_ENTRY", "STOCK_UPDATE", "PRICE_UPDATE", "GET_REPORT", "GET_INVENTORY"] = "ADD_ENTRY"
+    intent: Literal["ADD_ENTRY", "STOCK_UPDATE", "PRICE_UPDATE", "GET_REPORT", "GET_INVENTORY", "UDHARI_ADD", "UDHARI_PAYMENT"] = "ADD_ENTRY"
     # ADD_ENTRY fields (required for ADD_ENTRY, ignored for others)
     amount: Optional[float] = Field(default=None)
     type: Optional[Literal["income", "expense"]] = Field(default=None)
@@ -55,6 +55,8 @@ class ExtractedEntry(BaseModel):
     quantity: Optional[float] = Field(default=None)
     # Price — used by PRICE_UPDATE
     price_per_unit: Optional[float] = Field(default=None)
+    # Customer credit (Udhari) — used by UDHARI_ADD and UDHARI_PAYMENT
+    customer_name: Optional[str] = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
     def check_intent_fields(self):
@@ -80,6 +82,11 @@ class ExtractedEntry(BaseModel):
         elif self.intent in {"GET_REPORT", "GET_INVENTORY"}:
             # No extra validation needed — just a request
             pass
+        elif self.intent in {"UDHARI_ADD", "UDHARI_PAYMENT"}:
+            if not self.customer_name or not self.customer_name.strip():
+                raise ValueError(f"{self.intent} requires customer_name")
+            if self.amount is None or self.amount <= 0:
+                raise ValueError(f"{self.intent} requires amount > 0")
         return self
 
 
@@ -293,6 +300,28 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
         "Keys: intent (only). Set category to 'inventory'.\n"
         "Examples: 'mujhe meri inventory dekhni hai', 'mera stock dikhao', "
         "'kitna stock bacha hai', 'show my inventory', 'stock list bhejo'\n\n"
+
+        "=== intent: UDHARI_ADD (vendor gave credit to a customer) ===\n"
+        "Use when vendor says they GAVE goods/money on credit (udhari diya, udhaar diya, baaki rakha).\n"
+        "Keys: intent, customer_name, amount. (customer_name = person's name, amount = rupees.)\n"
+        "RULES:\n"
+        "- 'udhari diya', 'udhaar diya', 'baaki rakha', 'credit diya', 'khata mein daal' = UDHARI_ADD\n"
+        "- Extract the customer NAME carefully — it is a person's name, not an item.\n"
+        "EXAMPLES:\n"
+        "  'Ramesh ko 500 ka udhari diya' → intent:'UDHARI_ADD', customer_name:'Ramesh', amount:500\n"
+        "  'Suresh ne 200 baaki rakha, chai pi ke gaya' → intent:'UDHARI_ADD', customer_name:'Suresh', amount:200\n"
+        "  'Priya ko 150 ka udhaar diya biscuit ke liye' → intent:'UDHARI_ADD', customer_name:'Priya', amount:150\n\n"
+
+        "=== intent: UDHARI_PAYMENT (customer paid back their udhari) ===\n"
+        "Use when vendor says a customer PAID back / cleared their due (paise diya, payment mili, udhari chukaya).\n"
+        "Keys: intent, customer_name, amount.\n"
+        "RULES:\n"
+        "- 'ne diya', 'payment diya', 'udhari chukaya', 'baaki chukaya', 'paise aaye', 'clear kiya' = UDHARI_PAYMENT\n"
+        "- If customer paid FULL, use the amount mentioned.\n"
+        "EXAMPLES:\n"
+        "  'Ramesh ne 500 diya' → intent:'UDHARI_PAYMENT', customer_name:'Ramesh', amount:500\n"
+        "  'Suresh ne apna udhari chukaya, 300 diya' → intent:'UDHARI_PAYMENT', customer_name:'Suresh', amount:300\n"
+        "  'Priya ne 100 diye partial payment' → intent:'UDHARI_PAYMENT', customer_name:'Priya', amount:100\n\n"
 
         "Return ONLY valid JSON. No explanation.\n"
     )
@@ -1231,6 +1260,25 @@ def process_voice_message(phone: str, media_id: str) -> str:
     # First handle command-style intents separately.
     for entry_data in extracted:
         intent = str(entry_data.get("intent") or "ADD_ENTRY").upper()
+
+        # ── Udhari intents (customer credit / payment) ───────────────────
+        if intent in ("UDHARI_ADD", "UDHARI_PAYMENT"):
+            try:
+                from services.udhari import add_udhari, record_payment, format_udhari_added_msg, format_payment_received_msg
+                customer_name = (entry_data.get("customer_name") or "").strip()
+                amount = float(entry_data.get("amount") or 0)
+                if not customer_name or amount <= 0:
+                    return "Samajh nahi aaya — customer ka naam aur amount dono boliye 🙏"
+                if intent == "UDHARI_ADD":
+                    summary = add_udhari(vendor_phone=phone, customer_name=customer_name, amount=amount, note=transcript[:100])
+                    return format_udhari_added_msg(customer_name=customer_name, amount=amount, total_due=float(summary.get("total_due", 0)))
+                else:  # UDHARI_PAYMENT
+                    summary = record_payment(vendor_phone=phone, customer_name=customer_name, amount=amount, note=transcript[:100])
+                    return format_payment_received_msg(customer_name=customer_name, paid=amount, remaining=float(summary.get("total_due", 0)))
+            except Exception as udhari_exc:
+                logger.error("Udhari intent failed: %s", udhari_exc)
+                return "⚠️ Udhari update mein problem aayi. Kripya dobara boliye."
+
         if intent == "GET_REPORT":
             try:
                 from services.report_generator import generate_pnl_pdf

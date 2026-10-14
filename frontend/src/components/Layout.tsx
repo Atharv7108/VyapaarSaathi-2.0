@@ -7,7 +7,8 @@ import {
   Package,
   User,
   LogOut,
-  Globe
+  Globe,
+  Wallet,
 } from "lucide-react";
 
 export default function Layout() {
@@ -75,6 +76,10 @@ export default function Layout() {
             <NavLink to="/app/ledger" className={linkClass}>
               <BookOpen className="w-4 h-4 shrink-0" />
               <span>{isHindi ? "खाता" : "Ledger"}</span>
+            </NavLink>
+            <NavLink to="/app/udhari" className={linkClass}>
+              <Wallet className="w-4 h-4 shrink-0" />
+              <span>{isHindi ? "उधारी" : "Udhari"}</span>
             </NavLink>
             <NavLink to="/app/inventory" className={linkClass}>
               <Package className="w-4 h-4 shrink-0" />
@@ -164,6 +169,10 @@ export default function Layout() {
         <NavLink to="/app/ledger" className={mobileLinkClass}>
           <BookOpen className="w-5 h-5 mb-0.5" />
           <span>{isHindi ? "खाता" : "Ledger"}</span>
+        </NavLink>
+        <NavLink to="/app/udhari" className={mobileLinkClass}>
+          <Wallet className="w-5 h-5 mb-0.5" />
+          <span>{isHindi ? "उधारी" : "Udhari"}</span>
         </NavLink>
         <NavLink to="/app/inventory" className={mobileLinkClass}>
           <Package className="w-5 h-5 mb-0.5" />
