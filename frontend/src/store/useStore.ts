@@ -715,34 +715,43 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   downloadReport: async () => {
-    const { vendorId } = get();
+    const { vendorId, language } = get();
     try {
       // Step 1: get the PDF URL from the API
       const data = await fetchJson(`/api/report?vendor_id=${encodeURIComponent(vendorId)}`);
       if (!data.pdf_url || typeof data.pdf_url !== "string") {
-        alert("Koi sales data nahi mila report ke liye. Pehle kuch entries record karein!");
+        alert(
+          language === "hi"
+            ? "कोई बिक्री डेटा नहीं मिला रिपोर्ट के लिए। पहले कुछ बिक्री रिकॉर्ड करें!"
+            : "No sales data found for report. Record some sales first!"
+        );
         return;
       }
 
-      // Step 2: fetch the PDF as binary blob
-      const pdfRes = await fetch(data.pdf_url);
-      if (!pdfRes.ok) throw new Error(`PDF fetch failed: ${pdfRes.status}`);
-      const blob = await pdfRes.blob();
+      // Step 2: Resolve full URL and download
+      const fullUrl = data.pdf_url.startsWith("http")
+        ? data.pdf_url
+        : `${API_BASE || ""}${data.pdf_url}`;
 
-      // Step 3: trigger browser download via hidden <a> tag
-      const blobUrl = URL.createObjectURL(blob);
-      const fileName = data.pdf_url.split("/").pop() || "VyapaarSaathi_Report.pdf";
+      // Open in new tab so merchant can immediately view & print
+      window.open(fullUrl, "_blank");
+
+      // Also trigger file download via anchor
+      const fileName = data.pdf_url.split("/").pop() || "VyapaarSaathi_PnL_Report.pdf";
       const anchor = document.createElement("a");
-      anchor.href = blobUrl;
+      anchor.href = fullUrl;
       anchor.download = fileName;
+      anchor.target = "_blank";
       document.body.appendChild(anchor);
       anchor.click();
       document.body.removeChild(anchor);
-      // Release memory
-      setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
     } catch (e: any) {
       console.warn("downloadReport failed:", e);
-      alert("Report download mein error aaya. Dobara try karein.");
+      alert(
+        language === "hi"
+          ? "रिपोर्ट डाउनलोड में समस्या आई। कृपया दोबारा प्रयास करें।"
+          : "Report download failed. Please try again."
+      );
     }
   },
 

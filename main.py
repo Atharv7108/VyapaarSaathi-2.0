@@ -399,6 +399,36 @@ def _handle_text_message(sender: str, text: str) -> None:
     except Exception as udhari_err:
         logger.warning("Text udhari handler error: %s", udhari_err)
 
+    # Active vendor: check if text is a P&L report request
+    try:
+        from services.voice_ledger import _looks_like_pnl_report_request
+        if _looks_like_pnl_report_request(text):
+            from services.report_generator import generate_pnl_pdf
+            from services.voice_ledger import send_whatsapp_reply
+            db = get_db()
+            vdoc = db["vendors"].find_one({"phone": sender})
+            vname = (vdoc or {}).get("business_name") or (vdoc or {}).get("name") or sender
+            pdf_url = generate_pnl_pdf(sender, vendor_name=vname)
+            if pdf_url:
+                if sender.startswith("whatsapp:"):
+                    try:
+                        send_whatsapp_reply(
+                            to_phone=sender,
+                            body="📊 *VyapaarSaathi — Trading & Profit & Loss Statement (PDF)*\n\nAapka P&L Report PDF WhatsApp par bhej diya gaya hai! Upar check karein.",
+                            media_url=pdf_url,
+                            filename="VyapaarSaathi_PnL_Report.pdf",
+                        )
+                        return
+                    except Exception as wa_exc:
+                        logger.warning("Failed to send P&L PDF over WhatsApp in text handler: %s", wa_exc)
+                _send_safe_reply(sender, f"📊 Aapka Profit & Loss Report PDF: {pdf_url}")
+                return
+            else:
+                _send_safe_reply(sender, "⚠️ Ledger mein abhi koi sales transactions nahi mile. Pehle sales record kijiye!")
+                return
+    except Exception as rep_err:
+        logger.warning("Text report handler error: %s", rep_err)
+
     # Active vendor — text messages not supported for daily sales entries
     _send_safe_reply(sender, VOICE_PROMPT_MESSAGE)
 

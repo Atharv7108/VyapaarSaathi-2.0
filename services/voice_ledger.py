@@ -1228,6 +1228,18 @@ def _looks_like_inventory_request(transcript: str) -> bool:
     return has_request and not has_update_or_transaction
 
 
+def _looks_like_pnl_report_request(text: str) -> bool:
+    cleaned = text.strip().lower()
+    if "udhari" in cleaned or "udhaar" in cleaned or "khata" in cleaned:
+        return False
+    triggers = [
+        "report", "pnl", "profit and loss", "profit loss", "mera hisaab", "mera hisab",
+        "hisaab bhejo", "hisab bhejo", "weekly report", "p&l", "statement", "balance sheet",
+        "mera record", "record bhejo", "record do", "hisaab do", "hisab do",
+    ]
+    return any(t in cleaned for t in triggers)
+
+
 def process_voice_message(phone: str, media_id: str) -> str:
     from services.conversation_engine import (
         analyze_voice_input, process_follow_up_answer, has_pending, get_pending,
@@ -1285,6 +1297,33 @@ def process_voice_message(phone: str, media_id: str) -> str:
                 return caption
     except Exception as fast_exc:
         logger.warning("Udhari fast-path check failed: %s", fast_exc)
+
+    # Fast path: handle P&L report requests deterministically
+    if _looks_like_pnl_report_request(transcript):
+        try:
+            from services.report_generator import generate_pnl_pdf
+            db = get_db()
+            vdoc = db["vendors"].find_one({"phone": phone})
+            vname = (vdoc or {}).get("business_name") or (vdoc or {}).get("name") or phone
+            pdf_url = generate_pnl_pdf(phone, vendor_name=vname)
+            if pdf_url and phone.startswith("whatsapp:"):
+                try:
+                    send_whatsapp_reply(
+                        to_phone=phone,
+                        body="📊 *VyapaarSaathi — Trading & Profit & Loss Statement (PDF)*\n\nAapka P&L Report PDF WhatsApp par bhej diya gaya hai! Upar check karein.",
+                        media_url=pdf_url,
+                        filename="VyapaarSaathi_PnL_Report.pdf",
+                    )
+                    return "📊 Aapka Profit & Loss Report PDF WhatsApp par bhej diya gaya hai! Upar check karein."
+                except Exception as wa_exc:
+                    logger.warning("Failed to send P&L PDF over WhatsApp in fast-path: %s", wa_exc)
+            elif pdf_url:
+                return f"📊 Aapka Profit & Loss Report PDF tayyar hai: {pdf_url}"
+            else:
+                return "⚠️ Ledger mein abhi koi sales transactions nahi mile. Pehle sales record kijiye!"
+        except Exception as report_exc:
+            logger.error("Report fast-path failed: %s", report_exc)
+            return "⚠️ Report generate karne mein problem aayi. Kripya dobara try kijiye."
 
     extracted = extract_json(transcript)
     if not extracted:
@@ -1380,16 +1419,24 @@ def process_voice_message(phone: str, media_id: str) -> str:
         if intent == "GET_REPORT":
             try:
                 from services.report_generator import generate_pnl_pdf
-                pdf_url = generate_pnl_pdf(phone, vendor_name=phone)
+                db = get_db()
+                vdoc = db["vendors"].find_one({"phone": phone})
+                vname = (vdoc or {}).get("business_name") or (vdoc or {}).get("name") or phone
+                pdf_url = generate_pnl_pdf(phone, vendor_name=vname)
                 if pdf_url:
-                    send_whatsapp_reply(
-                        to_phone=phone,
-                        body="📊 Here is your weekly P&L report:",
-                        media_url=pdf_url,
-                    )
-                    return "📊 Your weekly report has been sent! Check the PDF attached above."
+                    if phone.startswith("whatsapp:"):
+                        try:
+                            send_whatsapp_reply(
+                                to_phone=phone,
+                                body="📊 *VyapaarSaathi — Trading & Profit & Loss Statement (PDF)*\n\nAapka P&L Report PDF WhatsApp par bhej diya gaya hai! Upar check karein.",
+                                media_url=pdf_url,
+                                filename="VyapaarSaathi_PnL_Report.pdf",
+                            )
+                        except Exception as wa_exc:
+                            logger.warning("WhatsApp send reply failed in GET_REPORT: %s", wa_exc)
+                    return "📊 Aapka Profit & Loss Report PDF WhatsApp par bhej diya gaya hai! Upar check karein."
                 else:
-                    return "⚠️ No transactions found this week. Record some sales first!"
+                    return "⚠️ Ledger mein abhi koi sales transactions nahi mile. Pehle sales record kijiye!"
             except Exception as report_exc:
                 logger.error("GET_REPORT failed: %s", report_exc)
                 return "⚠️ Report generation failed. Please try again."

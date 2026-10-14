@@ -66,32 +66,59 @@ def _fetch_all_data(phone: str) -> Dict[str, Any]:
     """
     Fetch all ledger entries and inventory data for the vendor.
     Returns a dict with structured financial data for the P&L statement.
-    Uses last 30 days to match the AI Insights date window exactly.
+    Attempts 30-day window first; falls back to all available ledger entries if needed.
     """
     db = get_db()
     today = datetime.now(timezone.utc)
-    # Use same 30-day window as AI Insights so numbers always match
+    # Use same 30-day window as AI Insights
     start_30d = today - timedelta(days=30)
     start_iso = start_30d.replace(hour=0, minute=0, second=0).isoformat()
     start_date = start_30d.date()
 
-    # ── Ledger entries ────────────────────────────────────────────────────────
-    entries = []
+    # Normalise phones to fetch
+    phones_to_fetch = [phone]
+    if phone.startswith("whatsapp:"):
+        phones_to_fetch.append(phone.replace("whatsapp:", ""))
+    else:
+        phones_to_fetch.append(f"whatsapp:{phone}")
+    if "web-client" not in phones_to_fetch:
+        phones_to_fetch.append("web-client")
 
+    # ── Ledger entries ────────────────────────────────────────────────────────
+    # 1. Try 30-day window
     if phone == "web-client":
         entries = list(db[LEDGER].find({
             "created_at": {"$gte": start_iso}
         }).sort("created_at", 1))
     else:
-        phones_to_fetch = [phone, "web-client"]
         entries = list(db[LEDGER].find({
             "phone": {"$in": phones_to_fetch},
             "created_at": {"$gte": start_iso}
         }).sort("created_at", 1))
 
+    # 2. Fallback to all-time entries if no entries in last 30 days
+    if not entries:
+        if phone == "web-client":
+            entries = list(db[LEDGER].find().sort("created_at", 1))
+        else:
+            entries = list(db[LEDGER].find({
+                "phone": {"$in": phones_to_fetch}
+            }).sort("created_at", 1))
+            if not entries:
+                entries = list(db[LEDGER].find().sort("created_at", 1))
+
+    # Set start_date to earliest entry if found
+    if entries:
+        try:
+            earliest_dt = str(entries[0].get("created_at") or "")[:10]
+            if earliest_dt:
+                start_date = datetime.fromisoformat(earliest_dt).date()
+        except Exception:
+            pass
+
     # ── Inventory (for opening/closing stock valuation) ────────────────────
     inv_rows = []
-    for try_phone in [phone, "web-client"] if phone != "web-client" else [phone]:
+    for try_phone in phones_to_fetch:
         inv_rows = list(db[TABLE].find({
             "phone": try_phone,
             "stock_date": date.today().isoformat(),
@@ -99,6 +126,23 @@ def _fetch_all_data(phone: str) -> Dict[str, Any]:
         }))
         if inv_rows:
             break
+
+    if not inv_rows:
+        for try_phone in phones_to_fetch:
+            rows = list(db[TABLE].find({
+                "phone": try_phone,
+                "is_active": True
+            }).sort("stock_date", -1))
+            if rows:
+                seen_items = set()
+                deduped = []
+                for row in rows:
+                    iname = str(row.get("item_name") or "").strip().lower()
+                    if iname not in seen_items:
+                        seen_items.add(iname)
+                        deduped.append(row)
+                inv_rows = deduped
+                break
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     # Income (Sales) by category
@@ -337,8 +381,13 @@ def generate_pnl_pdf(phone: str, vendor_name: str = "Vendor") -> Optional[str]:
         
     # If the remaining string is just a phone number (mostly digits/plus) or a generic key
     clean_for_check = display_name.replace("+", "").strip()
-    if clean_for_check.isdigit() or display_name == "web-client":
-        display_name = "VENDOR"
+    if clean_for_check.isdigit() or display_name in ("web-client", "VENDOR", "Vendor"):
+        db = get_db()
+        vdoc = db["vendors"].find_one({"phone": {"$in": [phone, f"whatsapp:{phone}".replace("whatsapp:whatsapp:", "whatsapp:")]}})
+        if vdoc and (vdoc.get("business_name") or vdoc.get("name")):
+            display_name = vdoc.get("business_name") or vdoc.get("name")
+        else:
+            display_name = "VENDOR"
 
     # ── Build PDF ─────────────────────────────────────────────────────────────
     pdf = PnLPDF()
