@@ -40,6 +40,69 @@ SUPPORTED_AUDIO_EXTENSIONS = (
 
 LOW_STOCK_RATIO_THRESHOLD = 0.2
 
+# Whisper and LLM transcripts commonly spell Indian numbers in Latin or
+# Devanagari script. Normalize only standalone number words before extraction;
+# item names and the original transcript remain unchanged for display/audit.
+_SPOKEN_NUMBER_WORDS = {
+    "shunya": "0", "shoonya": "0", "zero": "0", "शून्य": "0",
+    "ek": "1", "एक": "1", "do": "2", "दो": "2", "teen": "3", "तीन": "3",
+    "char": "4", "chaar": "4", "चार": "4", "paanch": "5", "पांच": "5",
+    "छह": "6", "cheh": "6", "chhe": "6", "saat": "7", "सात": "7",
+    "aath": "8", "आठ": "8", "nau": "9", "नौ": "9", "das": "10", "दस": "10",
+    "gyarah": "11", "ग्यारह": "11", "baarah": "12", "बारह": "12",
+    "terah": "13", "तेरह": "13", "chaudah": "14", "चौदह": "14",
+    "pandrah": "15", "पंद्रह": "15", "solah": "16", "सोलह": "16",
+    "satrah": "17", "सत्रह": "17", "atharah": "18", "अठारह": "18",
+    "unnis": "19", "उन्नीस": "19", "bees": "20", "बीस": "20",
+    "tees": "30", "तीस": "30", "chaalis": "40", "चालीस": "40",
+    "pachaas": "50", "पचास": "50", "saath": "60", "साठ": "60",
+    "sattar": "70", "सत्तर": "70", "assi": "80", "अस्सी": "80",
+    "nabbe": "90", "नब्बे": "90", "sau": "100", "सौ": "100",
+    "hazaar": "1000", "hazar": "1000", "हजार": "1000",
+}
+
+
+def normalize_spoken_numbers(text: str) -> str:
+    """Convert common standalone Indian number words to digits for extraction."""
+    if not text:
+        return text
+    import re
+
+    normalized = text
+    compound_units = {
+        "sau": 100,
+        "सौ": 100,
+        "hazaar": 1000,
+        "hazar": 1000,
+        "हजार": 1000,
+    }
+    compound_numbers = {
+        word: int(number)
+        for word, number in _SPOKEN_NUMBER_WORDS.items()
+        if number.isdigit() and int(number) <= 100
+    }
+    for number_word, number_value in sorted(compound_numbers.items(), key=lambda item: -len(item[0])):
+        for unit_word, unit_value in compound_units.items():
+            words = f"{number_word} {unit_word}"
+            if all(ord(char) < 128 for char in words):
+                pattern = rf"(?<![A-Za-z]){re.escape(words)}(?![A-Za-z])"
+            else:
+                pattern = rf"(?<![\u0900-\u097F]){re.escape(words)}(?![\u0900-\u097F])"
+            normalized = re.sub(
+                pattern,
+                str(number_value * unit_value),
+                normalized,
+                flags=re.IGNORECASE,
+            )
+
+    for word, number in sorted(_SPOKEN_NUMBER_WORDS.items(), key=lambda item: -len(item[0])):
+        if all(ord(char) < 128 for char in word):
+            pattern = rf"(?<![A-Za-z]){re.escape(word)}(?![A-Za-z])"
+        else:
+            pattern = rf"(?<![\u0900-\u097F]){re.escape(word)}(?![\u0900-\u097F])"
+        normalized = re.sub(pattern, number, normalized, flags=re.IGNORECASE)
+    return normalized
+
 # In-memory state to avoid sending duplicate proactive alerts every scheduler tick.
 _stock_alert_state: Dict[str, str] = {}
 
@@ -266,7 +329,12 @@ def transcribe_audio(audio_path: Path) -> Dict[str, str]:
                     data={
                         "model": whisper_model,
                         "language": "hi",
-                        "prompt": "Hindi, Marathi, Hinglish business transactions: Chai bechi, udhari diya, hisaab, baki.",
+                        "prompt": (
+                            "Hindi, Marathi, Hinglish business transactions. "
+                            "Keep the original words, do not translate. "
+                            "Examples: bees chai teen sau mein bechi, "
+                            "pachaas samose, Ramesh ko paanch sau udhari."
+                        ),
                     },
                     timeout=25,
                 )
@@ -393,11 +461,12 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
     )
 
 
-    candidate_models = []
     preferred = settings.groq_llm_model or "openai/gpt-oss-20b"
-    for m in [preferred, "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
-        if m and m not in candidate_models:
-            candidate_models.append(m)
+    # Keep one fast fallback only. Trying several models in sequence makes a
+    # normal voice reply slow and can produce inconsistent interpretations.
+    candidate_models = [preferred]
+    if preferred != "openai/gpt-oss-20b":
+        candidate_models.append("openai/gpt-oss-20b")
 
     headers = {
         "Authorization": f"Bearer {settings.groq_api_key}",
@@ -551,10 +620,11 @@ def save_to_db(phone: str, extracted_data: Dict[str, Any], audio_url: str, catal
         except Exception as price_exc:
             logger.warning("Price lookup failed: %s", price_exc)
 
-        # If still 0, set amount = quantity (placeholder to prevent DB constraint violation)
         if amount <= 0:
-            amount = quantity
-            logger.info("No price found for '%s', using amount=quantity=%g", extracted_data.get("category"), quantity)
+            raise ValueError(
+                f"Cannot save income entry for '{extracted_data.get('category')}' "
+                "without an amount or known inventory price"
+            )
 
     record = {
         "phone": phone,
@@ -1415,7 +1485,7 @@ def process_voice_message(phone: str, media_id: str) -> str:
             logger.error("Report fast-path failed: %s", report_exc)
             return "⚠️ Report generate karne mein problem aayi. Kripya dobara try kijiye."
 
-    extracted = extract_json(transcript)
+    extracted = extract_json(normalize_spoken_numbers(transcript))
     if not extracted:
         return FALLBACK_RESPONSE
 

@@ -1,4 +1,11 @@
-from services.voice_ledger import _build_inventory_snapshot_message, _looks_like_inventory_request
+import pytest
+
+from services.voice_ledger import (
+    _build_inventory_snapshot_message,
+    _looks_like_inventory_request,
+    normalize_spoken_numbers,
+    save_to_db,
+)
 
 
 def test_inventory_keyword_variants_are_detected():
@@ -67,3 +74,42 @@ def test_inventory_snapshot_message_includes_stockout_alerts():
 
     assert "Instant Alert: Stockout" in message
     assert "vada pav: stockout" in message
+
+
+@pytest.mark.parametrize(
+    ("spoken", "expected"),
+    [
+        ("aaj bees chai teen sau mein bechi", "aaj 20 chai 300 mein bechi"),
+        ("pachaas samose beche", "50 samose beche"),
+        ("Ramesh ko paanch sau udhari diya", "Ramesh ko 500 udhari diya"),
+        ("आज बीस चाय तीन सौ में बेची", "आज 20 चाय 300 में बेची"),
+    ],
+)
+def test_normalize_spoken_numbers(spoken, expected):
+    assert normalize_spoken_numbers(spoken) == expected
+
+
+def test_save_rejects_income_without_amount_or_known_price(monkeypatch):
+    class _Ledger:
+        def insert_one(self, _record):
+            raise AssertionError("incomplete income must not be inserted")
+
+    class _Database:
+        def __getitem__(self, name):
+            assert name == "ledger"
+            return _Ledger()
+
+    monkeypatch.setattr("services.voice_ledger.get_db", lambda: _Database())
+    monkeypatch.setattr("services.inventory.get_inventory", lambda _phone: [])
+
+    with pytest.raises(ValueError, match="without an amount"):
+        save_to_db(
+            phone="web-client",
+            extracted_data={
+                "type": "income",
+                "category": "samosa",
+                "quantity": 50,
+                "amount": None,
+            },
+            audio_url="",
+        )

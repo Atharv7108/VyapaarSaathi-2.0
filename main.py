@@ -39,6 +39,7 @@ from services.voice_ledger import (
     send_whatsapp_list,
     convert_audio,
     extract_json,
+    normalize_spoken_numbers,
     save_to_db,
     transcribe_audio,
 )
@@ -1502,7 +1503,7 @@ async def record_voice_entry(
             if not transcript:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transcript was empty")
 
-            extracted = extract_json(transcript)
+            extracted = extract_json(normalize_spoken_numbers(transcript))
             if not extracted:
                 return {"detail": FALLBACK_RESPONSE, "transcript": transcript}
 
@@ -1680,7 +1681,7 @@ async def record_follow_up_answer(
                 phone_identifier = _normalize_phone(raw_id)
 
             # Extract data from the answer
-            answer_extracted = extract_json(transcript) or []
+            answer_extracted = extract_json(normalize_spoken_numbers(transcript)) or []
 
             # Get inventory
             try:
@@ -2264,4 +2265,3 @@ def get_udhari_report_pdf(vendor_phone: str = "web-client") -> Dict[str, Any]:
     except Exception as exc:
         logger.exception("Failed to generate Udhari report PDF: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
-
