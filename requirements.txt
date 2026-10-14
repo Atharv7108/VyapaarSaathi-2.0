@@ -14,3 +14,6 @@ apscheduler>=3.10
 pytz
 requests>=2.31.0
 gTTS>=2.5.4
+pyjwt>=2.8.0
+bcrypt>=4.0.0
+fpdf2>=2.8.0
