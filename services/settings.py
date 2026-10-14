@@ -25,6 +25,7 @@ class Settings:
     mongodb_db_name: str
     groq_llm_model: str
     groq_whisper_model: str
+    groq_whisper_language: str
     ffmpeg_binary: str
 
     enable_weekly_summary: bool
@@ -64,6 +65,7 @@ def get_settings() -> Settings:
         mongodb_db_name=os.getenv("MONGODB_DB_NAME", "vyapaarsaathi"),
         groq_llm_model=os.getenv("GROQ_LLM_MODEL", "openai/gpt-oss-20b"),
         groq_whisper_model=os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
+        groq_whisper_language=os.getenv("GROQ_WHISPER_LANGUAGE", "auto").strip().lower(),
         ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
 
         enable_weekly_summary=_to_bool(os.getenv("ENABLE_WEEKLY_SUMMARY"), default=False),

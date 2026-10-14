@@ -18,6 +18,7 @@ import {
   Filter,
   FileText,
   Loader2,
+  MessageCircle,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -31,6 +32,7 @@ interface Customer {
   is_settled: boolean;
   created_at: string;
   updated_at: string;
+  customer_phone?: string;
 }
 
 interface Transaction {
@@ -239,6 +241,8 @@ function CustomerDrawer({
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [loadingTxns, setLoadingTxns] = useState(true);
   const [modal, setModal] = useState<"credit" | "payment" | null>(null);
+  const [reminderLoading, setReminderLoading] = useState(false);
+  const [reminderError, setReminderError] = useState("");
 
   const loadTxns = useCallback(async () => {
     setLoadingTxns(true);
@@ -258,6 +262,33 @@ function CustomerDrawer({
   function handleModalSuccess() {
     loadTxns();
     onUpdate();
+  }
+
+  async function sendReminder() {
+    setReminderError("");
+    const customerPhone = customer.customer_phone || window.prompt("Customer WhatsApp number (with country code):", "");
+    if (!customerPhone?.trim()) return;
+    if (!window.confirm(`Send ₹${Number(customer.total_due || 0).toLocaleString("en-IN")} reminder to ${customer.customer_name_display}?`)) return;
+    setReminderLoading(true);
+    try {
+      const res = await fetch(`${API}/udhari/reminder`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          vendor_phone: vendorPhone,
+          customer_name: customer.customer_name,
+          customer_phone: customerPhone.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Reminder send failed");
+      alert("Reminder WhatsApp par bhej diya gaya.");
+      onUpdate();
+    } catch (err) {
+      setReminderError(err instanceof Error ? err.message : "Reminder send failed");
+    } finally {
+      setReminderLoading(false);
+    }
   }
 
   const recoveryRate = customer.total_given > 0
@@ -333,7 +364,22 @@ function CustomerDrawer({
             >
               <ArrowDownLeft className="w-3.5 h-3.5" /> Payment Lo
             </button>
+            {customer.total_due > 0 && (
+              <button
+                onClick={sendReminder}
+                disabled={reminderLoading}
+                className="flex-1 flex items-center justify-center gap-1.5 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-600 text-xs font-bold rounded-xl py-2.5 transition disabled:opacity-50"
+              >
+                {reminderLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <MessageCircle className="w-3.5 h-3.5" />}
+                Reminder
+              </button>
+            )}
           </div>
+          {reminderError && (
+            <p className="mx-5 mt-3 rounded-xl bg-red-50 border border-red-200 px-3 py-2 text-xs text-red-600">
+              {reminderError}
+            </p>
+          )}
 
           {/* Transaction List */}
           <div className="flex-1 overflow-y-auto">

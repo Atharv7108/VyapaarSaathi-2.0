@@ -90,6 +90,11 @@ from services.udhari import (
     get_customer_summary,
     get_customer_transactions,
     get_udhari_totals,
+    save_customer_phone,
+    get_recent_reminder,
+    record_udhari_reminder,
+    get_pending_customer_phone,
+    clear_pending_customer_phone,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -373,6 +378,25 @@ def _handle_text_message(sender: str, text: str) -> None:
             format_customer_query_reply,
             handle_all_udhari_report,
         )
+        pending_customer = get_pending_customer_phone(sender)
+        if pending_customer:
+            candidate_phone = text.strip()
+            digits = "".join(ch for ch in candidate_phone if ch.isdigit())
+            if len(digits) >= 8:
+                try:
+                    save_customer_phone(sender, pending_customer, candidate_phone)
+                except ValueError as phone_exc:
+                    _send_safe_reply(sender, f"⚠️ {phone_exc}")
+                    return
+                clear_pending_customer_phone(sender)
+                _send_safe_reply(
+                    sender,
+                    f"✅ {pending_customer.title()} ka WhatsApp number save ho gaya. "
+                    "Ab aap reminder bhej sakte hain.",
+                )
+                return
+            _send_safe_reply(sender, "🙏 Kripya customer ka valid WhatsApp number bhejiye, country code ke saath.")
+            return
         matched = match_udhari_query_or_report(text)
         if matched:
             m_intent, m_name = matched
@@ -1496,8 +1520,10 @@ async def record_voice_entry(
             raw_path = working_dir / f"incoming{extension}"
             raw_path.write_bytes(await audio.read())
 
-            mp3_audio = convert_audio(raw_path, working_dir)
-            transcript_payload = transcribe_audio(mp3_audio)
+            transcript_payload = transcribe_audio(raw_path, allow_local_fallback=False)
+            if not transcript_payload.get("text", "").strip():
+                mp3_audio = convert_audio(raw_path, working_dir)
+                transcript_payload = transcribe_audio(mp3_audio)
             transcript = (transcript_payload.get("text") or "").strip()
 
             if not transcript:
@@ -1515,10 +1541,18 @@ async def record_voice_entry(
             else:
                 phone_identifier = _normalize_phone(raw_id)
 
-            # ── Conversation Engine: analyze against inventory ────────────
-            try:
-                inv_items = get_inventory(phone_identifier)
-            except Exception:
+            # Only sales/expenses need inventory context. Command-only
+            # recordings avoid an unnecessary database read.
+            needs_inventory = any(
+                str(entry.get("intent") or "ADD_ENTRY").upper() == "ADD_ENTRY"
+                for entry in extracted
+            )
+            if needs_inventory:
+                try:
+                    inv_items = get_inventory(phone_identifier)
+                except Exception:
+                    inv_items = []
+            else:
                 inv_items = []
 
             analysis = analyze_voice_input(extracted, phone_identifier, inv_items)
@@ -1665,8 +1699,10 @@ async def record_follow_up_answer(
             raw_path = working_dir / f"incoming{extension}"
             raw_path.write_bytes(await audio.read())
 
-            mp3_audio = convert_audio(raw_path, working_dir)
-            transcript_payload = transcribe_audio(mp3_audio)
+            transcript_payload = transcribe_audio(raw_path, allow_local_fallback=False)
+            if not transcript_payload.get("text", "").strip():
+                mp3_audio = convert_audio(raw_path, working_dir)
+                transcript_payload = transcribe_audio(mp3_audio)
             transcript = (transcript_payload.get("text") or "").strip()
 
             if not transcript:
@@ -2156,6 +2192,12 @@ class UdhariPaymentIn(BaseModel):
     note: str = ""
 
 
+class UdhariReminderIn(BaseModel):
+    vendor_phone: str
+    customer_name: str
+    customer_phone: str = ""
+
+
 @app.get("/udhari/totals")
 def get_udhari_totals_endpoint(vendor_phone: str = "") -> Dict[str, Any]:
     """KPI summary: total outstanding, active customers, totals given / recovered."""
@@ -2223,6 +2265,53 @@ def record_payment_endpoint(body: UdhariPaymentIn) -> Dict[str, Any]:
     except Exception as exc:
         logger.exception("/udhari/payment failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/udhari/reminder")
+def send_udhari_reminder_endpoint(body: UdhariReminderIn) -> Dict[str, Any]:
+    """Send one manually-confirmed WhatsApp reminder for an outstanding account."""
+    try:
+        vendor_phone = body.vendor_phone.strip()
+        customer_name = body.customer_name.strip()
+        customer = get_customer_summary(vendor_phone, customer_name)
+        due = float(customer.get("total_due") or 0)
+        if not customer or due <= 0:
+            raise HTTPException(status_code=400, detail="This customer has no pending udhari")
+
+        customer_phone = body.customer_phone.strip() or str(customer.get("customer_phone") or "")
+        if not customer_phone:
+            raise HTTPException(status_code=400, detail="Customer WhatsApp number is required")
+        save_customer_phone(vendor_phone, customer_name, customer_phone)
+
+        previous = get_recent_reminder(vendor_phone, customer_name)
+        if previous:
+            created_at = str(previous.get("created_at") or "")
+            try:
+                sent_at = datetime.fromisoformat(created_at)
+                if (datetime.now(timezone.utc) - sent_at).total_seconds() < 86400:
+                    raise HTTPException(
+                        status_code=429,
+                        detail="Reminder already sent in the last 24 hours",
+                    )
+            except ValueError:
+                logger.warning("Invalid reminder timestamp for %s", customer_name)
+
+        display_name = customer.get("customer_name_display") or customer_name
+        message = (
+            f"Namaste {display_name} ji 🙏\n\n"
+            f"Aapke khate mein {due:,.0f} rupaye baki hain.\n"
+            "Jab suvidha ho, kripya payment kar dijiye.\n\n"
+            "Dhanyavaad."
+        )
+        recipient = customer_phone if customer_phone.startswith("whatsapp:") else f"whatsapp:+{customer_phone.lstrip('+')}"
+        message_id = send_whatsapp_reply(recipient, message)
+        record_udhari_reminder(vendor_phone, customer_name, customer_phone, due, message_id)
+        return {"success": True, "message_id": message_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("/udhari/reminder failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Reminder send failed: {exc}")
 
 
 @app.get("/udhari/transactions")

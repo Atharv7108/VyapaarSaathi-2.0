@@ -298,6 +298,11 @@ def process_follow_up_answer(
 
     # Extract numbers from the answer using LLM
     answer_data = _extract_answer_data(answer_transcript, pending_reason, category)
+    if not any(
+        answer_data.get(field) is not None
+        for field in ("quantity", "amount", "price_per_unit", "daily_stock")
+    ):
+        answer_data = _fallback_number_extraction(answer_transcript, pending_reason)
 
     if pending_reason == "NEEDS_QUANTITY":
         qty = answer_data.get("quantity")
@@ -387,6 +392,37 @@ def process_follow_up_answer(
                 logger.info("Created inventory for '%s' under '%s': ₹%.0f, stock=%d", category, inv_phone, price_val, stock_val)
             except Exception as exc:
                 logger.warning("Failed to create inventory for '%s': %s", category, exc)
+
+            # The original message may already contain the sale quantity
+            # (for example, "50 samosa beche"). Do not ask for it again.
+            original_quantity = original_entry.get("quantity")
+            original_amount = original_entry.get("amount")
+            if original_quantity and float(original_quantity) > 0:
+                original_entry["amount"] = float(original_quantity) * price_val
+                _clear_pending(phone)
+                return {
+                    "status": "complete",
+                    "entries_to_save": already_saved + [original_entry],
+                    "pending_entry": None,
+                    "inventory_created": {
+                        "item": category,
+                        "price": price_val,
+                        "daily_stock": stock_val,
+                    },
+                }
+            if original_amount and float(original_amount) > 0:
+                original_entry["quantity"] = float(original_amount) / price_val
+                _clear_pending(phone)
+                return {
+                    "status": "complete",
+                    "entries_to_save": already_saved + [original_entry],
+                    "pending_entry": None,
+                    "inventory_created": {
+                        "item": category,
+                        "price": price_val,
+                        "daily_stock": stock_val,
+                    },
+                }
 
             # Now ask for sale quantity
             question_hi = f"✅ {category} inventory में जोड़ दिया (₹{int(price_val)}/piece, daily {stock_val})। अब बताइए — आज कितने {category} बेचे?"
@@ -511,23 +547,40 @@ def _extract_answer_data(transcript: str, pending_reason: str, category: str) ->
     except Exception as exc:
         logger.warning("Answer extraction failed: %s", exc)
         # Fallback: try to parse numbers directly from transcript
-        return _fallback_number_extraction(transcript)
+        return _fallback_number_extraction(transcript, pending_reason)
 
 
-def _fallback_number_extraction(text: str) -> Dict[str, Any]:
+def _fallback_number_extraction(
+    text: str,
+    pending_reason: str = "",
+) -> Dict[str, Any]:
     """Simple regex-based number extraction as fallback."""
     import re
     numbers = re.findall(r'\d+\.?\d*', text)
     result: Dict[str, Any] = {"quantity": None, "amount": None, "price_per_unit": None, "daily_stock": None}
     
-    if len(numbers) >= 2:
+    nums = [float(number) for number in numbers]
+    if pending_reason == "NEW_ITEM":
+        if nums:
+            result["price_per_unit"] = nums[0]
+        if len(nums) >= 2:
+            result["daily_stock"] = nums[1]
+        return result
+
+    if pending_reason == "NEW_ITEM_SALE":
+        if nums:
+            result["quantity"] = nums[0]
+        if len(nums) >= 2:
+            result["amount"] = nums[1]
+        return result
+
+    if len(nums) >= 2:
         # Smaller number is likely quantity, larger is amount
-        nums = [float(n) for n in numbers[:2]]
-        nums.sort()
+        first_two = sorted(nums[:2])
+        result["quantity"] = first_two[0]
+        result["amount"] = first_two[1]
+    elif len(nums) == 1:
         result["quantity"] = nums[0]
-        result["amount"] = nums[1]
-    elif len(numbers) == 1:
-        result["quantity"] = float(numbers[0])
     
     return result
 

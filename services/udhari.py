@@ -16,6 +16,7 @@ Data model (MongoDB collection: "udhari"):
 """
 
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -96,7 +97,11 @@ def add_udhari(vendor_phone: str, customer_name: str, amount: float, note: str =
             },
         },
     )
-    return get_customer_summary(vendor_phone, customer_name)
+    summary = get_customer_summary(vendor_phone, customer_name)
+    if not summary.get("customer_phone"):
+        set_pending_customer_phone(vendor_phone, customer_name)
+        summary["needs_customer_phone"] = True
+    return summary
 
 
 def record_payment(vendor_phone: str, customer_name: str, amount: float, note: str = "") -> Dict[str, Any]:
@@ -139,6 +144,120 @@ def get_customer_summary(vendor_phone: str, customer_name: str) -> Dict[str, Any
     return doc or {}
 
 
+def save_customer_phone(vendor_phone: str, customer_name: str, customer_phone: str) -> Dict[str, Any]:
+    """Store the customer's WhatsApp number after explicit vendor confirmation."""
+    raw_digits = "".join(ch for ch in customer_phone if ch.isdigit())
+    if len(raw_digits) == 10:
+        cleaned_phone = f"+91{raw_digits}"
+    elif len(raw_digits) == 12 and raw_digits.startswith("91"):
+        cleaned_phone = f"+{raw_digits}"
+    elif len(raw_digits) >= 8:
+        cleaned_phone = f"+{raw_digits}"
+    else:
+        raise ValueError("Valid customer WhatsApp number is required")
+    vendor_digits = "".join(ch for ch in vendor_phone if ch.isdigit())
+    if vendor_digits.startswith("91") and len(vendor_digits) == 12:
+        vendor_digits = vendor_digits[2:]
+    if raw_digits == vendor_digits or raw_digits == f"91{vendor_digits}":
+        raise ValueError("Customer number cannot be the vendor's own number")
+    key = _normalize_name(customer_name)
+    phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
+    result = get_customer_summary(vendor_phone, customer_name)
+    if not result:
+        raise ValueError("Customer udhari account not found")
+    db = get_db()
+    db["udhari"].update_one(
+        {"vendor_phone": {"$in": phones}, "customer_name": key},
+        {"$set": {"customer_phone": cleaned_phone, "updated_at": _now_iso()}},
+    )
+    result["customer_phone"] = cleaned_phone
+    return result
+
+
+def set_pending_customer_phone(vendor_phone: str, customer_name: str) -> None:
+    db = get_db()
+    db["vendors"].update_one(
+        {"phone": vendor_phone},
+        {"$set": {"pending_udhari_phone_customer": _normalize_name(customer_name)}},
+    )
+
+
+def get_pending_customer_phone(vendor_phone: str) -> Optional[str]:
+    db = get_db()
+    vendor = db["vendors"].find_one(
+        {"phone": vendor_phone},
+        {"_id": 0, "pending_udhari_phone_customer": 1},
+    )
+    return (vendor or {}).get("pending_udhari_phone_customer")
+
+
+def clear_pending_customer_phone(vendor_phone: str) -> None:
+    db = get_db()
+    db["vendors"].update_one(
+        {"phone": vendor_phone},
+        {"$unset": {"pending_udhari_phone_customer": ""}},
+    )
+
+
+def get_recent_reminder(vendor_phone: str, customer_name: str) -> Optional[Dict[str, Any]]:
+    db = get_db()
+    return db["udhari_reminders"].find_one(
+        {
+            "vendor_phone": {"$in": get_phone_variants(vendor_phone)},
+            "customer_name": _normalize_name(customer_name),
+            "status": "sent",
+        },
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+
+
+def record_udhari_reminder(
+    vendor_phone: str,
+    customer_name: str,
+    customer_phone: str,
+    amount: float,
+    message_id: str,
+) -> None:
+    db = get_db()
+    db["udhari_reminders"].insert_one({
+        "vendor_phone": _normalize_phone(vendor_phone),
+        "customer_name": _normalize_name(customer_name),
+        "customer_phone": customer_phone,
+        "amount_due": float(amount),
+        "message_id": message_id,
+        "status": "sent",
+        "created_at": _now_iso(),
+    })
+
+
+def match_udhari_reminder(text: str) -> Optional[str]:
+    match = re.search(
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ko|की|का|के)\s+"
+        r"(?:udhari|udhar|udhaar|उधारी|उधार)\s+(?:ka\s+)?"
+        r"(?:reminder|yaad|message)",
+        text.strip().lower(),
+    )
+    if match:
+        return match.group(1).title()
+    match = re.search(
+        r"(?:([a-zA-Z\u0900-\u097F]+)\s+(?:ko|को)\s+)?"
+        r"(?:udhari\s+)?(?:reminder|yaad|message)\s+"
+        r"(?:bhej(?:o|na)?|send|do)(?:\s+(?:to|ko))?"
+        r"(?:\s+([a-zA-Z\u0900-\u097F]+))?",
+        text.strip().lower(),
+    )
+    if match:
+        return (match.group(1) or match.group(2)).title() if (match.group(1) or match.group(2)) else None
+    match = re.search(
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ko|की|का|के)?\s*"
+        r"(?:udhari|udhar|udhaar|उधारी|उधार)\s+"
+        r"(?:ka\s+)?(?:reminder|yaad|message)",
+        text.strip().lower(),
+    )
+    return match.group(1).title() if match else None
+
+
 def list_customers(vendor_phone: str, only_outstanding: bool = False, search: str = "") -> List[Dict[str, Any]]:
     db = get_db()
     phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
@@ -148,6 +267,24 @@ def list_customers(vendor_phone: str, only_outstanding: bool = False, search: st
     if search.strip():
         query["customer_name"] = {"$regex": _normalize_name(search), "$options": "i"}
     docs = list(db["udhari"].find(query, {"_id": 0}).sort("total_due", -1).limit(200))
+    payment_rows = list(db["udhari_transactions"].aggregate([
+        {
+            "$match": {
+                "vendor_phone": {"$in": phones},
+                "tx_type": "payment",
+            }
+        },
+        {
+            "$group": {
+                "_id": "$customer_name",
+                "total_paid": {"$sum": "$amount"},
+            }
+        },
+    ]))
+    payments_by_customer = {
+        row.get("_id"): float(row.get("total_paid") or 0)
+        for row in payment_rows
+    }
     # Deduplicate in case same customer is in multiple phone keys
     seen = set()
     unique = []
@@ -155,6 +292,8 @@ def list_customers(vendor_phone: str, only_outstanding: bool = False, search: st
         cname = d.get("customer_name")
         if cname not in seen:
             seen.add(cname)
+            if cname in payments_by_customer:
+                d["total_paid"] = payments_by_customer[cname]
             unique.append(d)
     return unique
 
@@ -209,16 +348,38 @@ def get_udhari_totals(vendor_phone: str) -> Dict[str, Any]:
         }
     row = result[0]
     row.pop("_id", None)
+    payment_total = list(db["udhari_transactions"].aggregate([
+        {
+            "$match": {
+                "vendor_phone": {"$in": phones},
+                "tx_type": "payment",
+            }
+        },
+        {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
+    ]))
+    if payment_total:
+        row["total_recovered_all_time"] = float(payment_total[0].get("total") or 0)
     return row
 
 
-def format_udhari_added_msg(customer_name: str, amount: float, total_due: float) -> str:
+def format_udhari_added_msg(
+    customer_name: str,
+    amount: float,
+    total_due: float,
+    needs_customer_phone: bool = False,
+) -> str:
+    phone_prompt = (
+        "\n\n📱 Customer ka WhatsApp number country code ke saath bhejiye "
+        "(jaise 919876543210), taaki future reminder bhej sakein."
+        if needs_customer_phone else ""
+    )
     return (
         f"✅ *Udhari Record ho gaya!*\n\n"
         f"👤 Customer: *{customer_name}*\n"
         f"💸 Diya: *₹{amount:,.0f}*\n"
         f"📊 Ab Baaki: *₹{total_due:,.0f}*\n\n"
         f"_VyapaarSaathi Khata — {datetime.now(timezone.utc).strftime('%d %b %Y')}_"
+        f"{phone_prompt}"
     )
 
 
@@ -315,11 +476,33 @@ class UdhariPDF(FPDF):
 
     def __init__(self):
         super().__init__(orientation="P", unit="pt", format="A4")
+        self._unicode_font = ""
+        for font_path in (
+            os.getenv("UDHARI_PDF_FONT", ""),
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ):
+            if not font_path or not Path(font_path).is_file():
+                continue
+            try:
+                self.add_font("UdhariUnicode", "", font_path)
+                self.add_font("UdhariUnicode", "B", font_path)
+                self.add_font("UdhariUnicode", "I", font_path)
+                self._unicode_font = "UdhariUnicode"
+                break
+            except Exception as exc:
+                logger.warning("Could not load Udhari PDF font %s: %s", font_path, exc)
         self.set_auto_page_break(auto=True, margin=36)
         self.ml = 36
         self.mr = 36
         self.pw = 595.28
         self.cw = self.pw - self.ml - self.mr
+
+    def set_font(self, family=None, style="", size=0):
+        if family == "Helvetica" and self._unicode_font:
+            family = self._unicode_font
+        super().set_font(family, style, size)
 
     def footer(self):
         self.set_y(-28)
@@ -569,14 +752,22 @@ def handle_all_udhari_report(vendor_phone: str, vendor_name: str = "") -> Tuple[
         )
         return (msg, None)
 
-    pdf_url = generate_udhari_pdf(vendor_phone=vendor_phone, vendor_name=vendor_name)
+    try:
+        pdf_url = generate_udhari_pdf(vendor_phone=vendor_phone, vendor_name=vendor_name)
+    except Exception as exc:
+        logger.exception("Udhari report generation failed for %s: %s", vendor_phone, exc)
+        pdf_url = None
 
     caption = (
         f"📄 *VyapaarSaathi — Udhari Khata Report (PDF)*\n\n"
         f"🔴 Kul Baaki (Total Due): *₹{outstanding:,.0f}*\n"
         f"👥 Active Baaki Khate: *{active_customers} customers*\n"
         f"💸 Kul Diya: *₹{total_given:,.0f}* | 💰 Recovered: *₹{total_recovered:,.0f}*\n\n"
-        f"📎 *Udhari Report PDF aapke WhatsApp par bhej di gayi hai!*"
+        + (
+            f"📎 *Udhari Report PDF aapke WhatsApp par bhej di gayi hai!*"
+            if pdf_url
+            else "⚠️ PDF abhi generate nahi ho paayi. Udhari summary upar di gayi hai."
+        )
     )
     return (caption, pdf_url)
 
@@ -600,6 +791,7 @@ def match_udhari_query_or_report(text: str) -> Optional[Tuple[str, Optional[str]
         "total udhari", "kul udhari", "udhari ka hisab", "udhari ka hisaab",
         "kiska kitna baki", "kiske kitne baki", "udhari pdf", "khata report",
         "kisko kitna diya", "kiske paas kitna baki", "all udhari", "full udhari",
+        "ibhari report", "ibhari ki report", "ibhari ka report",
         # Devanagari
         "सबकी उधारी", "सब के उधारी", "सब की उधारी", "उधारी रिपोर्ट", "उधारी की रिपोर्ट",
         "उधारी का रिपोर्ट", "कुल उधारी", "उधारी रजिस्टर", "उधारी लिस्ट", "सबका हिसाब",
@@ -667,3 +859,37 @@ def match_udhari_action(text: str) -> Optional[Tuple[str, str, float]]:
     return None
 
 
+def match_udhari_actions(text: str) -> List[Tuple[str, str, float]]:
+    """Find every explicit Udhari add/payment action in one transcript."""
+    cleaned = text.strip().lower()
+    matches: List[Tuple[int, str, str, float]] = []
+
+    pay_patterns = [
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ne|se|ने|से)\s+(\d+(?:\.\d+)?)\s*"
+        r"(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*"
+        r"(?:wapas|vaapas|wapis|vapis|lautaa|lota|laut|de|diye|diya|chukaye|jama|bheje|वापस|लौटाया|लौटाए|दिए|दिया|जमा|चुकाए)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:paid|returned)\s*(\d+(?:\.\d+)?)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:se|से)\s+(\d+(?:\.\d+)?)\s*"
+        r"(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*"
+        r"(?:aaye|mile|aaya|आए|मिले)",
+    ]
+    add_patterns = [
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ko|ने|को)?\s*(\d+(?:\.\d+)?)\s*"
+        r"(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*"
+        r"(?:ki|ke|ka)?\s*(?:udhari|udhar|udhaari|उधारी|उधार|baaki|baki)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ko|ने|को)\s*(\d+(?:\.\d+)?)\s*"
+        r"(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*"
+        r"(?:diye|diya|दिए|दिया)\s*(?:udhari|udhar|udhaari|उधारी|उधार)?",
+    ]
+    for pattern in pay_patterns:
+        for match in re.finditer(pattern, cleaned):
+            matches.append((match.start(), "UDHARI_PAYMENT", match.group(1).title(), float(match.group(2))))
+    for pattern in add_patterns:
+        for match in re.finditer(pattern, cleaned):
+            matches.append((match.start(), "UDHARI_ADD", match.group(1).title(), float(match.group(2))))
+
+    unique = {}
+    for position, action, name, amount in sorted(matches):
+        key = (position, action, name.lower(), amount)
+        unique[key] = (action, name, amount)
+    return list(unique.values())

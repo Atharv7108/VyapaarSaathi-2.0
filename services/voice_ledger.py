@@ -3,8 +3,11 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import subprocess
 import tempfile
+import time
+import unicodedata
 import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -68,7 +71,35 @@ def normalize_spoken_numbers(text: str) -> str:
         return text
     import re
 
-    normalized = text
+    normalized = unicodedata.normalize("NFKD", text)
+    normalized = "".join(
+        char for char in normalized if not unicodedata.combining(char)
+    )
+    # Whisper may return phonetic Latin spellings for common Hindi business
+    # words. Correct only high-confidence variants before structured extraction.
+    phonetic_corrections = {
+        "paanso": "paanch sau",
+        "panso": "paanch sau",
+        "uadhar": "udhari",
+        "ibhari": "udhari",
+        "udhar": "udhari",
+        "bis": "bees",
+        "rubia": "rupya",
+        "udhahertia": "udhari diya",
+        "deya": "diya",
+        "bich": "bech",
+        "bicha": "becha",
+        "nne": "ne",
+        "loota": "lautaa",
+    }
+    for misspelling, correction in phonetic_corrections.items():
+        normalized = re.sub(
+            rf"(?<![A-Za-z]){re.escape(misspelling)}(?![A-Za-z])",
+            correction,
+            normalized,
+            flags=re.IGNORECASE,
+        )
+    normalized = re.sub(r"\bgo(?=\s+\d)", "ko", normalized, flags=re.IGNORECASE)
     compound_units = {
         "sau": 100,
         "सौ": 100,
@@ -101,10 +132,28 @@ def normalize_spoken_numbers(text: str) -> str:
         else:
             pattern = rf"(?<![\u0900-\u097F]){re.escape(word)}(?![\u0900-\u097F])"
         normalized = re.sub(pattern, number, normalized, flags=re.IGNORECASE)
+    normalized = re.sub(r"\bgo(?=\s+\d)", "ko", normalized, flags=re.IGNORECASE)
     return normalized
 
 # In-memory state to avoid sending duplicate proactive alerts every scheduler tick.
 _stock_alert_state: Dict[str, str] = {}
+_inventory_cache: Dict[str, tuple[float, List[Dict[str, Any]]]] = {}
+_INVENTORY_CACHE_SECONDS = 5.0
+
+
+def _get_cached_inventory(phone: str, loader: Any) -> List[Dict[str, Any]]:
+    """Avoid duplicate inventory queries during one short voice interaction."""
+    now = time.monotonic()
+    cached = _inventory_cache.get(phone)
+    if cached and now - cached[0] < _INVENTORY_CACHE_SECONDS:
+        return cached[1]
+    items = loader(phone)
+    _inventory_cache[phone] = (now, items)
+    return items
+
+
+def invalidate_inventory_cache(phone: str) -> None:
+    _inventory_cache.pop(phone, None)
 
 
 class ExtractedEntry(BaseModel):
@@ -130,6 +179,7 @@ class ExtractedEntry(BaseModel):
     price_per_unit: Optional[float] = Field(default=None)
     # Customer credit (Udhari) — used by UDHARI_ADD, UDHARI_PAYMENT, UDHARI_QUERY
     customer_name: Optional[str] = Field(default=None, max_length=100)
+    clear_all: bool = False
 
     @model_validator(mode="after")
     def check_intent_fields(self):
@@ -158,11 +208,16 @@ class ExtractedEntry(BaseModel):
         elif self.intent == "UDHARI_QUERY":
             if not self.customer_name or not self.customer_name.strip():
                 self.intent = "UDHARI_REPORT"
-        elif self.intent in {"UDHARI_ADD", "UDHARI_PAYMENT"}:
+        elif self.intent == "UDHARI_ADD":
             if not self.customer_name or not self.customer_name.strip():
                 raise ValueError(f"{self.intent} requires customer_name")
             if self.amount is None or self.amount <= 0:
                 raise ValueError(f"{self.intent} requires amount > 0")
+        elif self.intent == "UDHARI_PAYMENT":
+            if not self.customer_name or not self.customer_name.strip():
+                raise ValueError(f"{self.intent} requires customer_name")
+            if not self.clear_all and (self.amount is None or self.amount <= 0):
+                raise ValueError(f"{self.intent} requires amount > 0 unless clear_all is true")
         return self
 
 
@@ -199,11 +254,15 @@ def _guess_extension(content_type: str, media_url: str) -> str:
     if parsed_content_type:
         extension = mimetypes.guess_extension(parsed_content_type)
         if extension:
+            if extension == ".oga":
+                return ".ogg"
             return extension
 
     media_path = media_url.split("?", maxsplit=1)[0].lower()
     for extension in SUPPORTED_AUDIO_EXTENSIONS:
         if media_path.endswith(extension):
+            if extension == ".oga":
+                return ".ogg"
             return extension
 
     return ".bin"
@@ -268,6 +327,8 @@ def convert_audio(input_audio: Path, destination_dir: Path) -> Path:
         "1",
         "-ar",
         "16000",
+        "-af",
+        "highpass=f=100,lowpass=f=7000,afftdn=nr=12:nf=-35,loudnorm=I=-16:TP=-1.5:LRA=11",
         str(output_audio),
     ]
 
@@ -312,8 +373,12 @@ def _get_whisper_model():
     return _whisper_model
 
 
-def transcribe_audio(audio_path: Path) -> Dict[str, str]:
-    """Transcribe audio using Groq Whisper API (fast cloud transcription), falling back to local Whisper."""
+def transcribe_audio(
+    audio_path: Path,
+    *,
+    allow_local_fallback: bool = True,
+) -> Dict[str, str]:
+    """Transcribe audio with Groq, optionally falling back to local Whisper."""
     settings = get_settings()
 
     # 1. Primary: Groq Cloud Whisper API (lightning-fast, ~0.3-0.5s)
@@ -321,40 +386,49 @@ def transcribe_audio(audio_path: Path) -> Dict[str, str]:
         try:
             whisper_model = settings.groq_whisper_model or "whisper-large-v3-turbo"
             logger.info("Transcribing with Groq Whisper API (%s): %s", whisper_model, audio_path.name)
+            mime_type = mimetypes.guess_type(audio_path.name)[0] or "application/octet-stream"
+            transcription_data = {
+                "model": whisper_model,
+                "prompt": (
+                    "Hindi, Marathi, Hinglish business transactions. "
+                    "Keep the original words, do not translate. "
+                    "Examples: bees chai teen sau mein bechi, "
+                    "pachaas samose, Ramesh ko paanch sau udhari."
+                ),
+            }
+            if settings.groq_whisper_language != "auto":
+                transcription_data["language"] = settings.groq_whisper_language
             with open(audio_path, "rb") as af:
                 resp = requests.post(
                     GROQ_TRANSCRIPTIONS_URL,
                     headers={"Authorization": f"Bearer {settings.groq_api_key}"},
-                    files={"file": (audio_path.name, af, "audio/mpeg")},
-                    data={
-                        "model": whisper_model,
-                        "language": "hi",
-                        "prompt": (
-                            "Hindi, Marathi, Hinglish business transactions. "
-                            "Keep the original words, do not translate. "
-                            "Examples: bees chai teen sau mein bechi, "
-                            "pachaas samose, Ramesh ko paanch sau udhari."
-                        ),
-                    },
-                    timeout=25,
+                    files={"file": (audio_path.name, af, mime_type)},
+                    data=transcription_data,
+                    timeout=15,
                 )
             if resp.status_code == 200:
                 text = (resp.json().get("text") or "").strip()
                 logger.info("Groq Whisper result: %s", text[:200])
                 if text:
-                    return {"text": text, "language": "hi"}
+                    return {"text": text, "language": settings.groq_whisper_language}
             else:
                 logger.warning("Groq Whisper API returned %s: %s", resp.status_code, resp.text)
         except Exception as e:
             logger.warning("Groq Whisper API call failed: %s, falling back to local Whisper", e)
 
+    if not allow_local_fallback:
+        return {"text": "", "language": ""}
+
     # 2. Fallback: local Whisper model
     try:
         model = _get_whisper_model()
         logger.info("Transcribing with local Whisper: %s", audio_path.name)
+        transcribe_options = {}
+        if settings.groq_whisper_language != "auto":
+            transcribe_options["language"] = settings.groq_whisper_language
         result = model.transcribe(
             str(audio_path),
-            language="hi",
+            **transcribe_options,
             task="transcribe",
             fp16=False,
             initial_prompt="Hindi, Marathi, Hinglish mein business transaction.",
@@ -374,7 +448,14 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
     system_prompt = (
         "You are a strict JSON extraction service for a small-business ledger. "
         "User audio transcripts can be Hindi, Marathi, Hinglish, or mixed language. "
-        "Extract ALL commands and return JSON: {'entries': [...]}\n\n"
+        "Extract ALL commands and return JSON: {\"entries\": [...]}\n\n"
+        "BATCH RULES:\n"
+        "- A 20–30 second recording may contain many actions; never summarize or drop one.\n"
+        "- Return one separate entry for every item, customer, payment, sale, and expense.\n"
+        "- Keep the original customer names and item names separate; never merge two people or items.\n"
+        "- Process the transcript from left to right and preserve the spoken amounts with their action.\n"
+        "- If one action is unclear, return it with null fields rather than deleting another clear action.\n"
+        "- UDHARI_ADD and UDHARI_PAYMENT entries do not need an inventory item.\n\n"
 
         "=== intent: ADD_ENTRY (vendor sold or spent money) ===\n"
         "Keys: intent, amount, type, category, description, quantity.\n"
@@ -422,11 +503,17 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
         "EXAMPLES:\n"
         "  'Ramesh ko 500 ka udhari diya' → intent:'UDHARI_ADD', customer_name:'Ramesh', amount:500\n"
         "  'Suresh ne 200 baaki rakha, chai pi ke gaya' → intent:'UDHARI_ADD', customer_name:'Suresh', amount:200\n"
-        "  'Priya ko 150 ka udhaar diya biscuit ke liye' → intent:'UDHARI_ADD', customer_name:'Priya', amount:150\n\n"
+        "  'Priya ko 150 ka udhaar diya biscuit ke liye' → intent:'UDHARI_ADD', customer_name:'Priya', amount:150\n"
+        "  If one transcript contains both a sale and credit, return BOTH entries: "
+        "'2 samosa beche, Ramesh ko 60 udhari diya' → "
+        "[ADD_ENTRY for 2 samosa, UDHARI_ADD for Ramesh]. "
+        "UDHARI_ADD does not require the item to exist in inventory.\n\n"
 
         "=== intent: UDHARI_PAYMENT (customer paid back their udhari) ===\n"
         "Use when vendor says a customer PAID back / cleared their due (paise diya, payment mili, udhari chukaya).\n"
         "Keys: intent, customer_name, amount.\n"
+        "If the vendor says a customer's udhari is fully clear/chukaya but gives no amount, "
+        "set clear_all:true and amount:null; the system will use that customer's current due.\n"
         "RULES:\n"
         "- 'ne diya', 'payment diya', 'udhari chukaya', 'baaki chukaya', 'paise aaye', 'clear kiya' = UDHARI_PAYMENT\n"
         "- If customer paid FULL, use the amount mentioned.\n"
@@ -434,6 +521,13 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
         "  'Ramesh ne 500 diya' → intent:'UDHARI_PAYMENT', customer_name:'Ramesh', amount:500\n"
         "  'Suresh ne apna udhari chukaya, 300 diya' → intent:'UDHARI_PAYMENT', customer_name:'Suresh', amount:300\n"
         "  'Priya ne 100 diye partial payment' → intent:'UDHARI_PAYMENT', customer_name:'Priya', amount:100\n\n"
+        "For multiple customers in one transcript, ALWAYS return one entry per action. "
+        "Example: 'Ramesh ko 500 udhari diya aur Suresh ko 300 udhari diya' → "
+        "[two UDHARI_ADD entries]. "
+        "Example: 'Ramesh ne 500 wapas diye aur Suresh ne 300 clear kiye' → "
+        "[two UDHARI_PAYMENT entries]. "
+        "Words 'clear', 'chukaya', 'wapas diya', and 'payment mili' mean payment received, "
+        "not new credit.\n\n"
 
         "=== intent: UDHARI_QUERY (vendor asks about a specific customer's balance/udhari) ===\n"
         "Use when vendor asks about how much a specific customer owes or asks to show their udhari/hisaab.\n"
@@ -474,10 +568,12 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
     }
 
     raw_content = ""
+    response_model = ""
     for model_name in candidate_models:
         payload: Dict[str, Any] = {
             "model": model_name,
             "temperature": 0,
+            "max_tokens": 800,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -493,17 +589,20 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
                 GROQ_CHAT_COMPLETIONS_URL,
                 headers=headers,
                 json=payload,
-                timeout=30,
+                timeout=15,
             )
 
             # Some models may reject strict response_format. Retry once without it.
-            if response.status_code == 400 and "response_format" in response.text:
+            if response.status_code == 400 and (
+                "response_format" in response.text
+                or "json_validate_failed" in response.text
+            ):
                 payload.pop("response_format", None)
                 response = requests.post(
                     GROQ_CHAT_COMPLETIONS_URL,
                     headers=headers,
                     json=payload,
-                    timeout=30,
+                    timeout=15,
                 )
 
             if response.status_code == 200:
@@ -514,6 +613,7 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
                     .get("content", "")
                 )
                 if raw_content:
+                    response_model = model_name
                     break
             else:
                 logger.warning(
@@ -528,6 +628,13 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
         return None
 
     try:
+        logger.info(
+            "Voice extraction raw model=%s transcript_chars=%d response_chars=%d response=%s",
+            response_model,
+            len(transcript),
+            len(raw_content),
+            raw_content[:2000],
+        )
         content = (
             response.json()
             .get("choices", [{}])[0]
@@ -550,7 +657,12 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
                 validated = ExtractedEntry.model_validate(item)
                 results.append(validated.model_dump())
             except (ValidationError, ValueError) as exc:
-                logger.warning("Skipping invalid entry from Groq: %s — %s", item, exc)
+                logger.warning("Voice extraction skipped entry item=%s error=%s", item, exc)
+        logger.info(
+            "Voice extraction validated entries=%d raw_entries=%d",
+            len(results),
+            len(raw_list),
+        )
         return results if results else None
     except (ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
         logger.warning("Groq extraction parse/validation failed: %s", exc)
@@ -1371,7 +1483,10 @@ def _looks_like_inventory_request(transcript: str) -> bool:
 
 def _looks_like_pnl_report_request(text: str) -> bool:
     cleaned = text.strip().lower()
-    if any(u in cleaned for u in ("udhari", "udhaar", "khata", "उधारी", "उधार", "खाता")):
+    if any(u in cleaned for u in (
+        "udhari", "udhaar", "udhar", "ibhari", "ibhari", "khata",
+        "उधारी", "उधार", "खाता",
+    )):
         return False
     triggers = [
         "report", "pnl", "profit and loss", "profit loss", "mera hisaab", "mera hisab",
@@ -1383,6 +1498,53 @@ def _looks_like_pnl_report_request(text: str) -> bool:
     return any(t in cleaned for t in triggers)
 
 
+def _looks_like_mixed_entry(text: str) -> bool:
+    """Return True when an Udhari phrase also contains a ledger transaction."""
+    cleaned = (text or "").lower()
+    transaction_terms = (
+        "becha", "bechi", "beche", "bech diya", "sell", "sold",
+        "kharcha", "kharche", "expense", "par kharch", "rupay mein",
+        "rate", "stock", "banaya", "rakha", "piece", "items",
+        "बेचा", "बेची", "बेचे", "खर्च", "स्टॉक", "बनाया",
+    )
+    return any(term in cleaned for term in transaction_terms)
+
+
+def _looks_like_multiple_udhari(text: str) -> bool:
+    """Keep multi-customer credit messages on the full extraction path."""
+    cleaned = (text or "").lower()
+    action_count = len(re.findall(
+        r"\b(?:udhari|udhaar|udhar|baaki|baki|clear|chukaya|chukaye|paid|wapas|lautaa|lota|laut)\b"
+        r"|उधारी|उधार|बाकी|साफ|चुकाया|चुकाए|लौटाया|लौटाए",
+        cleaned,
+    ))
+    amount_count = len(re.findall(
+        r"\b\d+(?:\.\d+)?\b|"
+        r"\b(?:sau|do sau|teen sau|paanch sau|hazaar|सौ|हजार)\b",
+        cleaned,
+    ))
+    separator_count = len(re.findall(r"\b(?:aur|and|or)\b|,| तथा | और ", cleaned))
+    return action_count >= 2 or (amount_count >= 2 and separator_count >= 1)
+
+
+def _recover_explicit_udhari_actions(text: str) -> List[Dict[str, Any]]:
+    """Recover clear named Udhari actions when structured extraction fails."""
+    from services.udhari import match_udhari_actions
+
+    recovered: List[Dict[str, Any]] = []
+    for action, customer_name, amount in match_udhari_actions(text):
+        recovered.append(
+            {
+                "intent": action,
+                "customer_name": customer_name,
+                "amount": amount,
+                "clear_all": False,
+                "description": text[:200],
+            }
+        )
+    return recovered
+
+
 def process_voice_message(phone: str, media_id: str) -> str:
     from services.conversation_engine import (
         analyze_voice_input, process_follow_up_answer, has_pending, get_pending,
@@ -1390,15 +1552,28 @@ def process_voice_message(phone: str, media_id: str) -> str:
     from services.inventory import get_inventory
     catalog_phone = phone
 
+    started_at = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="vyapaarsaathi-wa-") as tmp_dir:
         working_dir = Path(tmp_dir)
         raw_audio = download_audio(media_id, working_dir)
-        mp3_audio = convert_audio(raw_audio, working_dir)
-        transcript_payload = transcribe_audio(mp3_audio)
+        # Preserve the source codec on the fast path. Conversion is retained
+        # as a compatibility fallback for formats rejected by the API.
+        transcript_payload = transcribe_audio(raw_audio, allow_local_fallback=False)
+        if not transcript_payload.get("text", "").strip():
+            logger.info("Direct audio transcription was empty; retrying normalized audio")
+            mp3_audio = convert_audio(raw_audio, working_dir)
+            transcript_payload = transcribe_audio(mp3_audio)
 
     transcript = transcript_payload.get("text", "").strip()
+    logger.info(
+        "Voice timing phone=%s transcription_pipeline=%.0fms",
+        phone,
+        (time.monotonic() - started_at) * 1000,
+    )
     if not transcript:
         return FALLBACK_RESPONSE
+
+    intent_transcript = normalize_spoken_numbers(transcript)
 
     # Fast path: handle common inventory view commands deterministically.
     if _looks_like_inventory_request(transcript):
@@ -1414,17 +1589,97 @@ def process_voice_message(phone: str, media_id: str) -> str:
         from services.udhari import (
             match_udhari_query_or_report,
             match_udhari_action,
+            match_udhari_actions,
+            match_udhari_reminder,
             format_customer_query_reply,
             handle_all_udhari_report,
             add_udhari,
             record_payment,
+            get_customer_summary,
+            get_recent_reminder,
+            record_udhari_reminder,
             format_udhari_added_msg,
             format_payment_received_msg,
         )
 
         # 1. Check Udhari Query or Report
-        udhari_fast = match_udhari_query_or_report(transcript)
-        if udhari_fast:
+        udhari_fast = match_udhari_query_or_report(intent_transcript)
+        mixed_entry = _looks_like_mixed_entry(intent_transcript)
+        multiple_udhari = _looks_like_multiple_udhari(intent_transcript)
+        logger.info(
+            "Udhari intent scope phone=%s transcript=%r normalized=%r",
+            phone,
+            transcript[:300],
+            intent_transcript[:300],
+        )
+        reminder_customer = match_udhari_reminder(intent_transcript)
+        if reminder_customer and not mixed_entry:
+            customer = get_customer_summary(phone, reminder_customer)
+            due = float(customer.get("total_due") or 0)
+            customer_phone = str(customer.get("customer_phone") or "")
+            if not customer:
+                return f"🔍 {reminder_customer} ka udhari account nahi mila."
+            if due <= 0:
+                return f"✅ {reminder_customer} ka udhari already clear hai."
+            if not customer_phone:
+                from services.udhari import set_pending_customer_phone
+                set_pending_customer_phone(phone, reminder_customer)
+                return (
+                    f"📱 {reminder_customer} ka WhatsApp number saved nahi hai. "
+                    "Country code ke saath number bhejiye."
+                )
+            previous = get_recent_reminder(phone, reminder_customer)
+            if previous:
+                try:
+                    sent_at = datetime.fromisoformat(str(previous.get("created_at")))
+                    if (datetime.now(timezone.utc) - sent_at).total_seconds() < 86400:
+                        return "⏳ Is customer ko reminder pichhle 24 ghante mein bheja ja chuka hai."
+                except ValueError:
+                    logger.warning("Invalid reminder timestamp for %s", reminder_customer)
+            reminder_text = (
+                f"Namaste {customer.get('customer_name_display') or reminder_customer} ji 🙏\n\n"
+                f"Aapke khate mein {due:,.0f} rupaye baki hain.\n"
+                "Jab suvidha ho, kripya payment kar dijiye.\n\nDhanyavaad."
+            )
+            recipient = customer_phone if customer_phone.startswith("whatsapp:") else f"whatsapp:+{customer_phone.lstrip('+')}"
+            message_id = send_whatsapp_reply(recipient, reminder_text)
+            record_udhari_reminder(phone, reminder_customer, customer_phone, due, message_id)
+            return f"✅ {reminder_customer} ko udhari reminder bhej diya gaya."
+        if multiple_udhari and not mixed_entry:
+            action_replies = []
+            for act_type, c_name, c_amt in match_udhari_actions(intent_transcript):
+                if act_type == "UDHARI_ADD":
+                    summary = add_udhari(
+                        vendor_phone=phone,
+                        customer_name=c_name,
+                        amount=c_amt,
+                        note=transcript[:100],
+                    )
+                    action_replies.append(
+                        format_udhari_added_msg(
+                            customer_name=c_name,
+                            amount=c_amt,
+                            total_due=float(summary.get("total_due", 0)),
+                            needs_customer_phone=bool(summary.get("needs_customer_phone")),
+                        )
+                    )
+                else:
+                    summary = record_payment(
+                        vendor_phone=phone,
+                        customer_name=c_name,
+                        amount=c_amt,
+                        note=transcript[:100],
+                    )
+                    action_replies.append(
+                        format_payment_received_msg(
+                            customer_name=c_name,
+                            paid=c_amt,
+                            remaining=float(summary.get("total_due", 0)),
+                        )
+                    )
+            if action_replies:
+                return "\n".join(action_replies)
+        if udhari_fast and not mixed_entry and not multiple_udhari:
             u_intent, u_name = udhari_fast
             if u_intent == "UDHARI_QUERY" and u_name:
                 return format_customer_query_reply(vendor_phone=phone, customer_name=u_name)
@@ -1445,12 +1700,24 @@ def process_voice_message(phone: str, media_id: str) -> str:
                 return caption
 
         # 2. Check Udhari Add or Payment action
-        udhari_act = match_udhari_action(transcript)
-        if udhari_act:
+        udhari_act = match_udhari_action(intent_transcript)
+        if udhari_act and not mixed_entry and not multiple_udhari:
             act_type, c_name, c_amt = udhari_act
+            logger.info(
+                "Deterministic Udhari action phone=%s action=%s customer=%s amount=%s",
+                phone,
+                act_type,
+                c_name,
+                c_amt,
+            )
             if act_type == "UDHARI_ADD":
                 summary = add_udhari(vendor_phone=phone, customer_name=c_name, amount=c_amt, note=transcript[:100])
-                return format_udhari_added_msg(customer_name=c_name, amount=c_amt, total_due=float(summary.get("total_due", 0)))
+                return format_udhari_added_msg(
+                    customer_name=c_name,
+                    amount=c_amt,
+                    total_due=float(summary.get("total_due", 0)),
+                    needs_customer_phone=bool(summary.get("needs_customer_phone")),
+                )
             elif act_type == "UDHARI_PAYMENT":
                 summary = record_payment(vendor_phone=phone, customer_name=c_name, amount=c_amt, note=transcript[:100])
                 return format_payment_received_msg(customer_name=c_name, paid=c_amt, remaining=float(summary.get("total_due", 0)))
@@ -1459,7 +1726,7 @@ def process_voice_message(phone: str, media_id: str) -> str:
         logger.warning("Udhari fast-path check failed: %s", fast_exc)
 
     # Fast path: handle P&L report requests deterministically
-    if _looks_like_pnl_report_request(transcript):
+    if _looks_like_pnl_report_request(intent_transcript):
         try:
             from services.report_generator import generate_pnl_pdf
             db = get_db()
@@ -1485,18 +1752,34 @@ def process_voice_message(phone: str, media_id: str) -> str:
             logger.error("Report fast-path failed: %s", report_exc)
             return "⚠️ Report generate karne mein problem aayi. Kripya dobara try kijiye."
 
+    extraction_started = time.monotonic()
     extracted = extract_json(normalize_spoken_numbers(transcript))
+    logger.info(
+        "Voice timing phone=%s extraction=%.0fms transcript_chars=%d",
+        phone,
+        (time.monotonic() - extraction_started) * 1000,
+        len(transcript),
+    )
+    # A follow-up can still be understood by the deterministic number parser
+    # even when the main extraction model returns no JSON.
     if not extracted:
+        extracted = _recover_explicit_udhari_actions(transcript)
+    logger.info(
+        "Voice batch phone=%s transcript=%r extracted_count=%d extracted=%s",
+        phone,
+        transcript[:1000],
+        len(extracted or []),
+        extracted or [],
+    )
+    if not extracted and not has_pending(phone):
         return FALLBACK_RESPONSE
-
-    # Get inventory for conversation engine per vendor.
-    try:
-        inv_items = get_inventory(phone)
-    except Exception:
-        inv_items = []
 
     # ── Check if this is a follow-up answer to a pending question ─────────
     if has_pending(phone):
+        try:
+            inv_items = _get_cached_inventory(phone, get_inventory)
+        except Exception:
+            inv_items = []
         result = process_follow_up_answer(
             phone=phone,
             answer_transcript=transcript,
@@ -1517,7 +1800,9 @@ def process_voice_message(phone: str, media_id: str) -> str:
             return _save_and_reply(phone, result.get("entries_to_save", []), media_id, catalog_phone=catalog_phone)
 
     # ── Fresh message — analyze against inventory ────────────────────────
-    # First handle command-style intents separately.
+    # Handle Udhari commands separately, but keep processing any sale/expense
+    # entries from the same recording.
+    command_replies: List[str] = []
     for entry_data in extracted:
         intent = str(entry_data.get("intent") or "ADD_ENTRY").upper()
 
@@ -1527,14 +1812,27 @@ def process_voice_message(phone: str, media_id: str) -> str:
                 from services.udhari import add_udhari, record_payment, format_udhari_added_msg, format_payment_received_msg
                 customer_name = (entry_data.get("customer_name") or "").strip()
                 amount = float(entry_data.get("amount") or 0)
+                if intent == "UDHARI_PAYMENT" and entry_data.get("clear_all") and amount <= 0:
+                    from services.udhari import get_customer_summary
+                    current_due = get_customer_summary(phone, customer_name)
+                    amount = float(current_due.get("total_due") or 0)
                 if not customer_name or amount <= 0:
                     return "Samajh nahi aaya — customer ka naam aur amount dono boliye 🙏"
                 if intent == "UDHARI_ADD":
                     summary = add_udhari(vendor_phone=phone, customer_name=customer_name, amount=amount, note=transcript[:100])
-                    return format_udhari_added_msg(customer_name=customer_name, amount=amount, total_due=float(summary.get("total_due", 0)))
+                    reply = format_udhari_added_msg(
+                        customer_name=customer_name,
+                        amount=amount,
+                        total_due=float(summary.get("total_due", 0)),
+                        needs_customer_phone=bool(summary.get("needs_customer_phone")),
+                    )
                 else:  # UDHARI_PAYMENT
                     summary = record_payment(vendor_phone=phone, customer_name=customer_name, amount=amount, note=transcript[:100])
-                    return format_payment_received_msg(customer_name=customer_name, paid=amount, remaining=float(summary.get("total_due", 0)))
+                    reply = format_payment_received_msg(customer_name=customer_name, paid=amount, remaining=float(summary.get("total_due", 0)))
+                if len(extracted) == 1:
+                    return reply
+                command_replies.append(reply)
+                continue
             except Exception as udhari_exc:
                 logger.error("Udhari intent failed: %s", udhari_exc)
                 return "⚠️ Udhari update mein problem aayi. Kripya dobara boliye."
@@ -1546,7 +1844,11 @@ def process_voice_message(phone: str, media_id: str) -> str:
                 if not customer_name or customer_name.lower() in ("sab", "all", "sabka", "sabki", "sabke", "kiska", "kiske"):
                     intent = "UDHARI_REPORT"
                 else:
-                    return format_customer_query_reply(vendor_phone=phone, customer_name=customer_name)
+                    reply = format_customer_query_reply(vendor_phone=phone, customer_name=customer_name)
+                    if len(extracted) == 1:
+                        return reply
+                    command_replies.append(reply)
+                    continue
             except Exception as udhari_exc:
                 logger.error("UDHARI_QUERY failed: %s", udhari_exc)
                 return "⚠️ Customer ka hisaab nikalne mein problem aayi. Kripya dobara boliye."
@@ -1599,13 +1901,33 @@ def process_voice_message(phone: str, media_id: str) -> str:
 
         if intent == "GET_INVENTORY":
             try:
-                inventory_items = get_inventory(catalog_phone)
+                inventory_items = _get_cached_inventory(catalog_phone, get_inventory)
                 if not inventory_items:
-                    inventory_items = get_inventory(phone)
+                    inventory_items = _get_cached_inventory(phone, get_inventory)
                 return _build_inventory_snapshot_message(inventory_items)
             except Exception as inv_exc:
                 logger.error("GET_INVENTORY failed: %s", inv_exc)
                 return "⚠️ Inventory laane mein problem aayi. Kripya dobara try kijiye."
+
+    # Only sales/expenses need inventory context. Command-only messages avoid
+    # an extra database query because they were already handled above.
+    extracted = [
+        entry for entry in extracted
+        if str(entry.get("intent") or "ADD_ENTRY").upper()
+        not in ("UDHARI_ADD", "UDHARI_PAYMENT", "UDHARI_QUERY", "UDHARI_REPORT")
+    ]
+    needs_inventory = any(
+        str(entry.get("intent") or "ADD_ENTRY").upper() == "ADD_ENTRY"
+        for entry in extracted
+    )
+    if not needs_inventory:
+        reply = _save_and_reply(phone, extracted, media_id, catalog_phone=catalog_phone)
+        return "\n".join(command_replies + [reply]) if command_replies else reply
+
+    try:
+        inv_items = _get_cached_inventory(phone, get_inventory)
+    except Exception:
+        inv_items = []
 
     # Analyze all entries against inventory
     analysis = analyze_voice_input(extracted, phone, inv_items)
@@ -1623,11 +1945,14 @@ def process_voice_message(phone: str, media_id: str) -> str:
         question = analysis.get("counter_question_hi", "")
         if alert_lines:
             unique_alerts = list(dict.fromkeys(alert_lines))
-            return "🚨 Instant Alert:\n" + "\n".join(unique_alerts[:5]) + f"\n\n🤖 {question}"
-        return f"🤖 {question}"
+            reply = "🚨 Instant Alert:\n" + "\n".join(unique_alerts[:5]) + f"\n\n🤖 {question}"
+            return "\n".join(command_replies + [reply]) if command_replies else reply
+        reply = f"🤖 {question}"
+        return "\n".join(command_replies + [reply]) if command_replies else reply
 
     # All complete — save everything
-    return _save_and_reply(phone, analysis.get("entries_to_save", []), media_id, catalog_phone=catalog_phone)
+    reply = _save_and_reply(phone, analysis.get("entries_to_save", []), media_id, catalog_phone=catalog_phone)
+    return "\n".join(command_replies + [reply]) if command_replies else reply
 
 
 def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, catalog_phone: str = "") -> str:
@@ -1710,6 +2035,7 @@ def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, c
             logger.warning("save_to_db failed for entry %s: %s", entry_data, save_exc)
             continue
 
+    invalidate_inventory_cache(catalog_phone)
     reply_parts = []
     if parts:
         reply_parts.append("✅ " + ", ".join(parts))

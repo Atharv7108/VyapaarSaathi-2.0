@@ -604,10 +604,27 @@ export const useStore = create<AppState>((set, get) => ({
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       chunksArray = [];
 
-      const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+      const preferredMimeTypes = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/mp4",
+      ];
+      const mimeType = preferredMimeTypes.find((candidate) =>
+        MediaRecorder.isTypeSupported(candidate)
+      );
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
       recorderInstance = recorder;
 
       recorder.ondataavailable = (event: BlobEvent) => {
@@ -626,12 +643,13 @@ export const useStore = create<AppState>((set, get) => ({
           return;
         }
 
-        const blob = new Blob(chunksArray, { type: "audio/webm" });
+        const blob = new Blob(chunksArray, { type: recorder.mimeType || "audio/webm" });
+        const extension = (recorder.mimeType || "").includes("mp4") ? "m4a" : "webm";
         // Route to correct handler based on conversation state
         if (conversationMode === "answering") {
-          await uploadAnswer(blob);
+          await uploadAnswer(new File([blob], `voice-answer.${extension}`, { type: blob.type }));
         } else {
-          await uploadRecording(blob);
+          await uploadRecording(new File([blob], `voice-entry.${extension}`, { type: blob.type }));
         }
         
         stream.getTracks().forEach((track) => track.stop());
