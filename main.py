@@ -1444,12 +1444,19 @@ def get_entries(vendor_id: str = "", limit: int = 100) -> Dict[str, Any]:
     db = get_db()
 
     try:
-        query = {}
         incoming_identifier = (vendor_id or "").strip()
-        if incoming_identifier and not _is_uuid(incoming_identifier) and _is_phone_identifier(incoming_identifier):
-            normalized = incoming_identifier if incoming_identifier.startswith("whatsapp:") else f"whatsapp:{incoming_identifier}"
-            query["phone"] = normalized
-        
+        from services.vendor_manager import get_phone_variants
+        if incoming_identifier:
+            if not _is_uuid(incoming_identifier) and _is_phone_identifier(incoming_identifier):
+                variants = get_phone_variants(incoming_identifier)
+                query = {"phone": {"$in": variants}}
+            elif _is_uuid(incoming_identifier):
+                query = {"phone": incoming_identifier}
+            else:
+                variants = get_phone_variants(incoming_identifier)
+                query = {"phone": {"$in": variants}}
+        else:
+            query = {"phone": "web-client"}
 
         rows = list(db["ledger"].find(query).sort("created_at", -1).limit(safe_limit))
         for row in rows:
@@ -1501,10 +1508,11 @@ async def record_voice_entry(
 
             # Map web frontend UUIDs to a consistent phone identifier.
             raw_id = vendor_id.strip()
+            from services.vendor_manager import _normalize_phone
             if not raw_id or _is_uuid(raw_id):
                 phone_identifier = "web-client"
             else:
-                phone_identifier = raw_id[:32]
+                phone_identifier = _normalize_phone(raw_id)
 
             # ── Conversation Engine: analyze against inventory ────────────
             try:
@@ -1573,7 +1581,7 @@ async def record_voice_entry(
                     continue
 
                 # ADD_ENTRY
-                saved = save_to_db(phone=phone_identifier, extracted_data=entry_data, audio_url="")
+                saved = save_to_db(phone=phone_identifier, extracted_data=entry_data, audio_url="", catalog_phone=phone_identifier)
                 last_saved = saved.get("entry", {})
                 current_profit = saved.get("current_profit", 0.0)
                 amount = float(saved["entry"].get("amount", 0)) if saved.get("entry") else 0
@@ -1665,10 +1673,11 @@ async def record_follow_up_answer(
 
             # Map vendor_id to phone
             raw_id = vendor_id.strip()
+            from services.vendor_manager import _normalize_phone
             if not raw_id or _is_uuid(raw_id):
                 phone_identifier = "web-client"
             else:
-                phone_identifier = raw_id[:32]
+                phone_identifier = _normalize_phone(raw_id)
 
             # Extract data from the answer
             answer_extracted = extract_json(transcript) or []
@@ -1701,7 +1710,7 @@ async def record_follow_up_answer(
                     if intent in ("STOCK_UPDATE", "PRICE_UPDATE", "GET_REPORT", "GET_INVENTORY"):
                         continue
 
-                    saved = save_to_db(phone=phone_identifier, extracted_data=entry_data, audio_url="")
+                    saved = save_to_db(phone=phone_identifier, extracted_data=entry_data, audio_url="", catalog_phone=phone_identifier)
                     last_saved = saved.get("entry", {})
                     current_profit = saved.get("current_profit", 0.0)
                     amount = float(saved["entry"].get("amount", 0)) if saved.get("entry") else 0
@@ -1869,12 +1878,13 @@ def get_inventory_items(vendor_id: str = "", phone: str = "") -> Dict[str, Any]:
     Accepts either phone (WhatsApp) or vendor_id (web UUID).
     """
     raw = phone.strip() or vendor_id.strip()
+    from services.vendor_manager import _normalize_phone
     if not raw:
         phone_key = "web-client"
     elif _is_uuid(raw):
         phone_key = "web-client"
     elif _is_phone_identifier(raw):
-        phone_key = raw if raw.startswith("whatsapp:") else f"whatsapp:{raw}"
+        phone_key = _normalize_phone(raw)
     else:
         phone_key = raw
     try:
@@ -1899,9 +1909,12 @@ class InventoryItemIn(BaseModel):
 @app.post("/inventory")
 def add_inventory_item(body: InventoryItemIn) -> Dict[str, Any]:
     """Add or update an item in the vendor's daily inventory catalog."""
+    from services.vendor_manager import _normalize_phone
     phone_key = (body.phone or body.vendor_id or "").strip() or "web-client"
     if _is_uuid(phone_key):
         phone_key = "web-client"
+    else:
+        phone_key = _normalize_phone(phone_key)
     try:
         row = upsert_inventory_item(
             phone=phone_key,
@@ -1922,9 +1935,12 @@ def add_inventory_item(body: InventoryItemIn) -> Dict[str, Any]:
 @app.delete("/inventory/{item_name}")
 def remove_inventory_item(item_name: str, vendor_id: str = "", phone: str = "") -> Dict[str, Any]:
     """Soft-delete an inventory item from the vendor's catalog."""
+    from services.vendor_manager import _normalize_phone
     phone_key = phone.strip() or vendor_id.strip() or "web-client"
     if _is_uuid(phone_key):
         phone_key = "web-client"
+    else:
+        phone_key = _normalize_phone(phone_key)
     try:
         delete_inventory_item(phone=phone_key, item_name=item_name)
         return {"deleted": item_name}
@@ -1942,19 +1958,18 @@ def get_pnl_report(vendor_id: str = "", phone: str = "") -> Dict[str, str]:
     Generate and return the URL for the Trading & P&L IT Return format PDF.
     """
     raw = phone.strip() or vendor_id.strip()
-    if not raw:
-        phone_key = "web-client"
-    elif _is_uuid(raw):
+    from services.vendor_manager import _normalize_phone, get_phone_variants
+    if not raw or _is_uuid(raw):
         phone_key = "web-client"
     elif _is_phone_identifier(raw):
-        phone_key = raw if raw.startswith("whatsapp:") else f"whatsapp:{raw}"
+        phone_key = _normalize_phone(raw)
     else:
         phone_key = raw
 
     try:
         from services.report_generator import generate_pnl_pdf
         # Look up vendor name from DB for proper report header
-        vendor_doc = get_db()["vendors"].find_one({"phone": phone_key}, {"name": 1, "business_name": 1})
+        vendor_doc = get_db()["vendors"].find_one({"phone": {"$in": get_phone_variants(phone_key)}}, {"name": 1, "business_name": 1})
         display_name = (
             (vendor_doc or {}).get("business_name")
             or (vendor_doc or {}).get("name")
@@ -1979,9 +1994,12 @@ class InventoryResetIn(BaseModel):
 @app.post("/inventory/reset")
 def reset_inventory(body: InventoryResetIn) -> Dict[str, Any]:
     """Reset today's current_stock = daily_stock for all items. Call each morning."""
+    from services.vendor_manager import _normalize_phone
     phone_key = (body.phone or body.vendor_id or "").strip() or "web-client"
     if _is_uuid(phone_key):
         phone_key = "web-client"
+    else:
+        phone_key = _normalize_phone(phone_key)
     try:
         count = reset_daily_stock(phone=phone_key)
         return {"reset_count": count}
@@ -2011,14 +2029,18 @@ def get_suggestions(
         # Fetch recent income ledger rows
         safe_days = max(7, min(days, 30))
         cutoff = (datetime.now(timezone.utc) - timedelta(days=safe_days)).isoformat()
-        
-        query = {"type": "income", "created_at": {"$gte": cutoff}}
         incoming = (vendor_id or "").strip()
-        phone_key = "web-client"
-        if _is_phone_identifier(incoming):
-            normalized = incoming if incoming.startswith("whatsapp:") else f"whatsapp:{incoming}"
-            query["phone"] = normalized
-            phone_key = normalized
+        from services.vendor_manager import _normalize_phone, get_phone_variants
+        if incoming and _is_phone_identifier(incoming):
+            phone_key = _normalize_phone(incoming)
+            variants = get_phone_variants(incoming)
+            query = {"type": "income", "created_at": {"$gte": cutoff}, "phone": {"$in": variants}}
+        elif incoming and _is_uuid(incoming):
+            phone_key = "web-client"
+            query = {"type": "income", "created_at": {"$gte": cutoff}, "phone": incoming}
+        else:
+            phone_key = "web-client"
+            query = {"type": "income", "created_at": {"$gte": cutoff}, "phone": "web-client"}
 
         rows = list(db["ledger"].find(query).sort("created_at", -1).limit(500))
 
@@ -2067,19 +2089,22 @@ def get_ai_insights(
     try:
         db = get_db()
         cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-        
-        query = {"created_at": {"$gte": cutoff}}
         incoming = (vendor_id or "").strip()
-        if _is_phone_identifier(incoming):
-            normalized = incoming if incoming.startswith("whatsapp:") else f"whatsapp:{incoming}"
-            query["phone"] = normalized
+        from services.vendor_manager import _normalize_phone, get_phone_variants
+        if incoming and _is_phone_identifier(incoming):
+            phone_key = _normalize_phone(incoming)
+            variants = get_phone_variants(incoming)
+            query = {"created_at": {"$gte": cutoff}, "phone": {"$in": variants}}
+        elif incoming and _is_uuid(incoming):
+            phone_key = "web-client"
+            query = {"created_at": {"$gte": cutoff}, "phone": incoming}
+        else:
+            phone_key = "web-client"
+            query = {"created_at": {"$gte": cutoff}, "phone": "web-client"}
 
         ledger_rows = list(db["ledger"].find(query).sort("created_at", -1).limit(500))
 
         # Fetch inventory items
-        phone_key = "web-client"
-        if _is_phone_identifier(incoming):
-            phone_key = incoming if incoming.startswith("whatsapp:") else f"whatsapp:{incoming}"
         try:
             inv_items = get_inventory(phone_key)
         except Exception:

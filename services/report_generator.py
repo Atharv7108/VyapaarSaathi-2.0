@@ -75,37 +75,23 @@ def _fetch_all_data(phone: str) -> Dict[str, Any]:
     start_iso = start_30d.replace(hour=0, minute=0, second=0).isoformat()
     start_date = start_30d.date()
 
-    # Normalise phones to fetch
-    phones_to_fetch = [phone]
-    if phone.startswith("whatsapp:"):
-        phones_to_fetch.append(phone.replace("whatsapp:", ""))
-    else:
-        phones_to_fetch.append(f"whatsapp:{phone}")
-    if "web-client" not in phones_to_fetch:
-        phones_to_fetch.append("web-client")
+    from services.vendor_manager import get_phone_variants
+
+    # Normalise phones to fetch — strictly isolated to this vendor's variants
+    phones_to_fetch = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
 
     # ── Ledger entries ────────────────────────────────────────────────────────
     # 1. Try 30-day window
-    if phone == "web-client":
-        entries = list(db[LEDGER].find({
-            "created_at": {"$gte": start_iso}
-        }).sort("created_at", 1))
-    else:
-        entries = list(db[LEDGER].find({
-            "phone": {"$in": phones_to_fetch},
-            "created_at": {"$gte": start_iso}
-        }).sort("created_at", 1))
+    entries = list(db[LEDGER].find({
+        "phone": {"$in": phones_to_fetch},
+        "created_at": {"$gte": start_iso}
+    }).sort("created_at", 1))
 
-    # 2. Fallback to all-time entries if no entries in last 30 days
+    # 2. Fallback to all-time entries for THIS vendor only
     if not entries:
-        if phone == "web-client":
-            entries = list(db[LEDGER].find().sort("created_at", 1))
-        else:
-            entries = list(db[LEDGER].find({
-                "phone": {"$in": phones_to_fetch}
-            }).sort("created_at", 1))
-            if not entries:
-                entries = list(db[LEDGER].find().sort("created_at", 1))
+        entries = list(db[LEDGER].find({
+            "phone": {"$in": phones_to_fetch}
+        }).sort("created_at", 1))
 
     # Set start_date to earliest entry if found
     if entries:
@@ -117,32 +103,26 @@ def _fetch_all_data(phone: str) -> Dict[str, Any]:
             pass
 
     # ── Inventory (for opening/closing stock valuation) ────────────────────
-    inv_rows = []
-    for try_phone in phones_to_fetch:
-        inv_rows = list(db[TABLE].find({
-            "phone": try_phone,
-            "stock_date": date.today().isoformat(),
-            "is_active": True
-        }))
-        if inv_rows:
-            break
+    inv_rows = list(db[TABLE].find({
+        "phone": {"$in": phones_to_fetch},
+        "stock_date": date.today().isoformat(),
+        "is_active": True
+    }))
 
     if not inv_rows:
-        for try_phone in phones_to_fetch:
-            rows = list(db[TABLE].find({
-                "phone": try_phone,
-                "is_active": True
-            }).sort("stock_date", -1))
-            if rows:
-                seen_items = set()
-                deduped = []
-                for row in rows:
-                    iname = str(row.get("item_name") or "").strip().lower()
-                    if iname not in seen_items:
-                        seen_items.add(iname)
-                        deduped.append(row)
-                inv_rows = deduped
-                break
+        rows = list(db[TABLE].find({
+            "phone": {"$in": phones_to_fetch},
+            "is_active": True
+        }).sort("stock_date", -1))
+        if rows:
+            seen_items = set()
+            deduped = []
+            for row in rows:
+                iname = str(row.get("item_name") or "").strip().lower()
+                if iname not in seen_items:
+                    seen_items.add(iname)
+                    deduped.append(row)
+            inv_rows = deduped
 
     # ── Aggregate ─────────────────────────────────────────────────────────────
     # Income (Sales) by category
@@ -383,7 +363,8 @@ def generate_pnl_pdf(phone: str, vendor_name: str = "Vendor") -> Optional[str]:
     clean_for_check = display_name.replace("+", "").strip()
     if clean_for_check.isdigit() or display_name in ("web-client", "VENDOR", "Vendor"):
         db = get_db()
-        vdoc = db["vendors"].find_one({"phone": {"$in": [phone, f"whatsapp:{phone}".replace("whatsapp:whatsapp:", "whatsapp:")]}})
+        from services.vendor_manager import get_phone_variants
+        vdoc = db["vendors"].find_one({"phone": {"$in": get_phone_variants(phone)}})
         if vdoc and (vdoc.get("business_name") or vdoc.get("name")):
             display_name = vdoc.get("business_name") or vdoc.get("name")
         else:

@@ -373,9 +373,8 @@ def process_follow_up_answer(
             price_val = float(price)
             stock_val = int(float(daily_stock)) if daily_stock and float(daily_stock) > 0 else 50
 
-            # Create the inventory entry under 'web-client' so it appears in the
-            # shared catalog that the web UI and all WhatsApp users share.
-            inv_phone = phone if phone == "web-client" else "web-client"
+            # Create the inventory entry under the vendor's actual phone so each vendor has their own catalog
+            inv_phone = phone
             try:
                 from services.inventory import upsert_inventory_item
                 upsert_inventory_item(

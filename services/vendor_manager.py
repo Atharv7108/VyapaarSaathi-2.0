@@ -104,10 +104,64 @@ VOICE_PROMPT_MESSAGE = (
 # ── Normalization ──────────────────────────────────────────────────────────────
 
 def _normalize_phone(phone: str) -> str:
-    p = phone.strip()
-    if not p.startswith("whatsapp:"):
-        p = f"whatsapp:{p}"
-    return p
+    p = (phone or "").strip()
+    if not p:
+        return ""
+    if p == "web-client":
+        return "web-client"
+    # Extract digits from core
+    core = p[9:] if p.startswith("whatsapp:") else p
+    core = core.strip()
+    digits = "".join(ch for ch in core if ch.isdigit())
+    if len(digits) == 10:
+        return f"whatsapp:+91{digits}"
+    elif len(digits) == 12 and digits.startswith("91"):
+        return f"whatsapp:+{digits}"
+    elif core.startswith("+"):
+        return f"whatsapp:{core}"
+    elif p.startswith("whatsapp:"):
+        return p
+    return f"whatsapp:{p}"
+
+
+def get_phone_variants(phone: str) -> List[str]:
+    """Return all common representations of a phone number for DB matching."""
+    p = (phone or "").strip()
+    if not p:
+        return []
+    if p == "web-client":
+        return ["web-client"]
+
+    variants = set()
+    variants.add(p)
+
+    core = p[9:] if p.startswith("whatsapp:") else p
+    core = core.strip()
+    variants.add(core)
+    variants.add(f"whatsapp:{core}")
+
+    digits = "".join(ch for ch in core if ch.isdigit())
+    if digits:
+        variants.add(digits)
+        variants.add(f"whatsapp:{digits}")
+        if len(digits) == 10:
+            variants.add(f"+91{digits}")
+            variants.add(f"91{digits}")
+            variants.add(f"whatsapp:+91{digits}")
+            variants.add(f"whatsapp:91{digits}")
+        elif len(digits) == 12 and digits.startswith("91"):
+            ten = digits[2:]
+            variants.add(ten)
+            variants.add(f"+{digits}")
+            variants.add(f"whatsapp:+{digits}")
+            variants.add(f"whatsapp:{digits}")
+            variants.add(f"whatsapp:+91{ten}")
+            variants.add(f"whatsapp:{ten}")
+
+    norm = _normalize_phone(p)
+    if norm:
+        variants.add(norm)
+    return list(variants)
 
 
 # ── CRUD helpers ──────────────────────────────────────────────────────────────
@@ -115,7 +169,8 @@ def _normalize_phone(phone: str) -> str:
 def get_vendor(phone: str) -> Optional[Dict[str, Any]]:
     try:
         db = get_db()
-        return db["vendors"].find_one({"phone": _normalize_phone(phone)})
+        variants = get_phone_variants(phone)
+        return db["vendors"].find_one({"phone": {"$in": variants}})
     except Exception as exc:
         logger.warning("get_vendor failed for %s: %s", phone, exc)
         return None
@@ -123,9 +178,10 @@ def get_vendor(phone: str) -> Optional[Dict[str, Any]]:
 
 def get_or_create_vendor(phone: str) -> Dict[str, Any]:
     normalized = _normalize_phone(phone)
+    variants = get_phone_variants(phone)
     try:
         db = get_db()
-        vendor = db["vendors"].find_one({"phone": normalized})
+        vendor = db["vendors"].find_one({"phone": {"$in": variants}})
         if vendor:
             return vendor
         now = datetime.now(timezone.utc).isoformat()
@@ -152,7 +208,7 @@ def update_last_active(phone: str) -> None:
     try:
         db = get_db()
         db["vendors"].update_one(
-            {"phone": _normalize_phone(phone)},
+            {"phone": {"$in": get_phone_variants(phone)}},
             {"$set": {"last_active": datetime.now(timezone.utc).isoformat()}},
         )
     except Exception as exc:
@@ -163,7 +219,7 @@ def set_vendor_state(phone: str, state: str) -> None:
     try:
         db = get_db()
         db["vendors"].update_one(
-            {"phone": _normalize_phone(phone)},
+            {"phone": {"$in": get_phone_variants(phone)}},
             {"$set": {"state": state, "last_active": datetime.now(timezone.utc).isoformat()}},
         )
     except Exception as exc:
@@ -174,7 +230,7 @@ def set_vendor_name(phone: str, name: str) -> None:
     try:
         db = get_db()
         db["vendors"].update_one(
-            {"phone": _normalize_phone(phone)},
+            {"phone": {"$in": get_phone_variants(phone)}},
             {"$set": {
                 "name": name.strip(),
                 "state": STATE_AWAITING_CATEGORY,
@@ -191,7 +247,7 @@ def set_vendor_category(phone: str, category_id: str, category_label: str) -> No
     try:
         db = get_db()
         db["vendors"].update_one(
-            {"phone": _normalize_phone(phone)},
+            {"phone": {"$in": get_phone_variants(phone)}},
             {"$set": {
                 "business_category_id": category_id,
                 "business_category": category_label,
@@ -209,7 +265,7 @@ def set_vendor_business_name(phone: str, business_name: str) -> None:
     try:
         db = get_db()
         db["vendors"].update_one(
-            {"phone": _normalize_phone(phone)},
+            {"phone": {"$in": get_phone_variants(phone)}},
             {"$set": {
                 "business_name": business_name.strip(),
                 "state": STATE_ACTIVE,
@@ -226,7 +282,7 @@ def update_vendor_onboarding(phone: str, name: str, vendor_type: str, language: 
     try:
         db = get_db()
         db["vendors"].update_one(
-            {"phone": _normalize_phone(phone)},
+            {"phone": {"$in": get_phone_variants(phone)}},
             {"$set": {
                 "name": name.strip(),
                 "vendor_type": vendor_type,

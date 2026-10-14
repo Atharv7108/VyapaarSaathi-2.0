@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from collections import defaultdict
 
 from db_config import get_db
+from services.vendor_manager import get_phone_variants, _normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -38,19 +39,21 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
     Return today's inventory for a vendor.
 
     Merges TWO sources:
-    1. Manual catalog rows from `inventory` table (vendor set these up)
+    1. Manual catalog rows from `inventory` table (vendor set these up or auto-created)
     2. Voice-detected items aggregated from `ledger` table (auto-discovered)
 
     Manual catalog items take priority. Items only seen in voice are shown as
     "auto" items with sales history but no explicit daily_stock target.
+    Data is strictly isolated per vendor phone — no cross-tenant leakage.
     """
     db = get_db()
     today = _today()
     cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
 
     # ── Source 1: Manual catalog items ───────────────────────────────────────
     manual_rows = list(db[TABLE].find({
-        "phone": phone,
+        "phone": {"$in": phone_variants},
         "stock_date": today,
         "is_active": True
     }).sort("item_name", 1))
@@ -62,31 +65,24 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
             if carried > 0:
                 logger.info("Auto-rolled %d inventory rows for %s on %s", carried, phone, today)
                 manual_rows = list(db[TABLE].find({
-                    "phone": phone,
+                    "phone": {"$in": phone_variants},
                     "stock_date": today,
                     "is_active": True
                 }).sort("item_name", 1))
         except Exception as exc:
             logger.warning("Auto-rollover failed for %s: %s", phone, exc)
 
-    # Final fallback to web-client shared items
-    if not manual_rows and phone != "web-client":
-        manual_rows = list(db[TABLE].find({
-            "phone": "web-client",
-            "stock_date": today,
-            "is_active": True
-        }).sort("item_name", 1))
-
-
     manual_items: Dict[str, Dict[str, Any]] = {r["item_name"]: r for r in manual_rows}
 
     # ── Source 2: Voice-detected items from ledger (last 30 days) ────────────
-    query = {
+    query: Dict[str, Any] = {
         "type": "income",
         "created_at": {"$gte": cutoff_30d}
     }
     if phone != "web-client":
-        query["phone"] = phone
+        query["phone"] = {"$in": phone_variants}
+    else:
+        query["phone"] = "web-client"
         
     ledger_rows = list(db[LEDGER].find(query).sort("created_at", 1).limit(1000))
 
@@ -193,10 +189,12 @@ def upsert_inventory_item(
     """
     db = get_db()
     today = _today()
+    phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
+    canonical_phone = _normalize_phone(phone) if phone != "web-client" else "web-client"
 
     # Check if row already exists for today
     existing = list(db[TABLE].find({
-        "phone": phone,
+        "phone": {"$in": phone_variants},
         "item_name": item_name.lower().strip(),
         "stock_date": today
     }))
@@ -204,10 +202,11 @@ def upsert_inventory_item(
     rows = existing
 
     if rows:
-        existing_id = rows[0]["id"]
-        existing_current = int(rows[0].get("current_stock") or 0)
-        existing_daily = int(rows[0].get("daily_stock") or daily_stock)
-        existing_price = float(rows[0].get("price_per_unit") or 0)
+        existing_doc = rows[0]
+        existing_id = existing_doc["_id"]
+        existing_current = int(existing_doc.get("current_stock") or 0)
+        existing_daily = int(existing_doc.get("daily_stock") or daily_stock)
+        existing_price = float(existing_doc.get("price_per_unit") or 0)
 
         if add_stock:
             # ── MODE 1: RESTOCK ──────────────────────────────────────
@@ -237,7 +236,7 @@ def upsert_inventory_item(
             )
 
         payload: Dict[str, Any] = {
-            "phone": phone,
+            "phone": canonical_phone,
             "item_name": item_name.lower().strip(),
             "item_name_hi": item_name_hi or item_name,
             "unit": unit,
@@ -254,7 +253,7 @@ def upsert_inventory_item(
     else:
         # Brand new item — daily_stock and current_stock = qty
         payload = {
-            "phone": phone,
+            "phone": canonical_phone,
             "item_name": item_name.lower().strip(),
             "item_name_hi": item_name_hi or item_name,
             "unit": unit,
@@ -276,8 +275,9 @@ def upsert_inventory_item(
 def delete_inventory_item(phone: str, item_name: str) -> bool:
     """Soft-delete an inventory item (marks is_active=False for all dates)."""
     db = get_db()
+    phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
     db[TABLE].update_many(
-        {"phone": phone, "item_name": item_name.lower().strip()},
+        {"phone": {"$in": phone_variants}, "item_name": item_name.lower().strip()},
         {"$set": {"is_active": False}}
     )
     return True
@@ -292,10 +292,12 @@ def reset_daily_stock(phone: str) -> int:
     db = get_db()
     today = _today()
     yesterday = (date.today() - timedelta(days=1)).isoformat()
+    phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
+    canonical_phone = _normalize_phone(phone) if phone != "web-client" else "web-client"
 
     # Check if today's rows already exist
     today_check = list(db[TABLE].find({
-        "phone": phone,
+        "phone": {"$in": phone_variants},
         "stock_date": today,
         "is_active": True
     }, {"_id": 1}))
@@ -303,7 +305,7 @@ def reset_daily_stock(phone: str) -> int:
     if today_check:
         # Today exists — just reset current_stock = daily_stock
         rows = list(db[TABLE].find({
-            "phone": phone,
+            "phone": {"$in": phone_variants},
             "stock_date": today,
             "is_active": True
         }, {"_id": 1, "daily_stock": 1}))
@@ -317,7 +319,7 @@ def reset_daily_stock(phone: str) -> int:
 
     # Today's rows don't exist — copy from yesterday's catalog
     yesterday_rows = list(db[TABLE].find({
-        "phone": phone,
+        "phone": {"$in": phone_variants},
         "stock_date": yesterday,
         "is_active": True
     }))
@@ -328,7 +330,7 @@ def reset_daily_stock(phone: str) -> int:
     new_rows = []
     for row in yesterday_rows:
         new_rows.append({
-            "phone": phone,
+            "phone": canonical_phone,
             "item_name": row["item_name"],
             "item_name_hi": row.get("item_name_hi", row["item_name"]),
             "unit": row.get("unit", "piece"),
@@ -346,36 +348,36 @@ def reset_daily_stock(phone: str) -> int:
 
 # ─── Auto-deduct after voice entry ───────────────────────────────────────────
 
-def deduct_stock(phone: str, item_name: str, quantity: float) -> Optional[Dict[str, Any]]:
+def deduct_stock(
+    phone: str,
+    item_name: str,
+    quantity: float,
+    amount: float = 0.0,
+    auto_create: bool = True,
+) -> Optional[Dict[str, Any]]:
     """
     Deduct `quantity` from current_stock for `item_name` today.
 
-    Called automatically after a voice entry with a quantity is saved.
-    Returns the updated row, or None if item not found in inventory.
-    Tries given phone first, then falls back to 'web-client' so WhatsApp
-    and web UI share the same inventory.
+    Called automatically after a voice entry with a quantity/amount is saved.
+    Returns the updated row.
+    If the item is not found in inventory and auto_create is True:
+    Automatically creates the item in the vendor's inventory with reasonable defaults
+    and deducts the sold quantity, ensuring the vendor's catalog is automatically populated.
     """
-    if quantity <= 0:
+    if quantity <= 0 and amount <= 0:
         return None
 
     db = get_db()
     today = _today()
     item_key = item_name.lower().strip()
+    phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
+    canonical_phone = _normalize_phone(phone) if phone != "web-client" else "web-client"
 
-    # Try given phone first, then fallback to 'web-client'
-    phones_to_try = [phone]
-    if phone != "web-client":
-        phones_to_try.append("web-client")
-
-    rows = []
-    for try_phone in phones_to_try:
-        rows = list(db[TABLE].find({
-            "phone": try_phone,
-            "stock_date": today,
-            "is_active": True
-        }))
-        if rows:
-            break
+    rows = list(db[TABLE].find({
+        "phone": {"$in": phone_variants},
+        "stock_date": today,
+        "is_active": True
+    }))
 
     # Try exact match first, then partial/fuzzy match
     matched = None
@@ -392,12 +394,41 @@ def deduct_stock(phone: str, item_name: str, quantity: float) -> Optional[Dict[s
                 matched = row
                 break
 
+    # If item doesn't exist yet, auto-create it!
     if not matched:
-        logger.info("No inventory item found for '%s' on %s — skipping deduction", item_name, today)
-        return None
+        if not auto_create:
+            logger.info("No inventory item found for '%s' on %s — skipping deduction", item_name, today)
+            return None
 
+        qty_num = float(quantity) if quantity and quantity > 0 else 1.0
+        unit = "cup" if any(w in item_key for w in ("coffee", "chai", "tea")) else "piece"
+        unit_price = (amount / qty_num) if (amount > 0 and qty_num > 0) else float(amount or 0.0)
+        init_daily = max(50, int(qty_num * 2))
+        init_current = max(0, init_daily - int(qty_num))
 
-    new_stock = max(0, int(matched["current_stock"]) - int(quantity))
+        logger.info(
+            "Auto-creating missing inventory item '%s' for %s: daily=%d, current=%d, price=₹%.0f",
+            item_name, canonical_phone, init_daily, init_current, unit_price
+        )
+        created_doc = upsert_inventory_item(
+            phone=canonical_phone,
+            item_name=item_name,
+            daily_stock=init_daily,
+            unit=unit,
+            price_per_unit=unit_price,
+            add_stock=False,
+        )
+        # Update current stock to reflect the sale
+        db[TABLE].update_one(
+            {"phone": {"$in": phone_variants}, "item_name": item_key, "stock_date": today},
+            {"$set": {"current_stock": init_current, "updated_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        created_doc["current_stock"] = init_current
+        return {**created_doc, "stockout": init_current == 0}
+
+    # Item exists — deduct quantity
+    deduct_qty = int(quantity) if quantity and quantity > 0 else 1
+    new_stock = max(0, int(matched["current_stock"]) - deduct_qty)
     db[TABLE].update_one(
         {"_id": matched["_id"]},
         {"$set": {"current_stock": new_stock, "updated_at": datetime.now(timezone.utc).isoformat()}}
@@ -409,7 +440,7 @@ def deduct_stock(phone: str, item_name: str, quantity: float) -> Optional[Dict[s
     stockout = new_stock == 0
     logger.info(
         "Deducted %g %s of '%s'. Stock: %d → %d%s",
-        quantity, matched["unit"], item_name,
+        deduct_qty, matched.get("unit", "piece"), item_name,
         matched["current_stock"], new_stock,
         " ⚠️ STOCKOUT" if stockout else ""
     )
@@ -427,9 +458,10 @@ def get_item_stats_from_ledger(phone: str, days: int = 14) -> List[Dict[str, Any
     """
     db = get_db()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
 
     rows = list(db[LEDGER].find({
-        "phone": phone,
+        "phone": {"$in": phone_variants},
         "type": "income",
         "created_at": {"$gte": cutoff},
         "quantity": {"$exists": True, "$ne": None}

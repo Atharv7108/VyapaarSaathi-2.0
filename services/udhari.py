@@ -26,6 +26,7 @@ from fpdf import FPDF
 from fpdf.enums import XPos, YPos
 
 from db_config import get_db
+from services.vendor_manager import get_phone_variants, _normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +42,17 @@ def _normalize_name(name: str) -> str:
 def get_or_create_customer(vendor_phone: str, customer_name: str) -> Dict[str, Any]:
     db = get_db()
     key = _normalize_name(customer_name)
+    canonical = _normalize_phone(vendor_phone) if vendor_phone != "web-client" else "web-client"
+    variants = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     doc = db["udhari"].find_one(
-        {"vendor_phone": vendor_phone, "customer_name": key},
+        {"vendor_phone": {"$in": variants}, "customer_name": key},
         {"_id": 0},
     )
     if doc:
         return doc
     now = _now_iso()
     new_doc = {
-        "vendor_phone": vendor_phone,
+        "vendor_phone": canonical,
         "customer_name": key,
         "customer_name_display": customer_name.strip(),
         "total_due": 0.0,
@@ -69,10 +72,12 @@ def add_udhari(vendor_phone: str, customer_name: str, amount: float, note: str =
         raise ValueError(f"Udhari amount must be positive, got {amount}")
     db = get_db()
     key = _normalize_name(customer_name)
+    canonical = _normalize_phone(vendor_phone) if vendor_phone != "web-client" else "web-client"
+    variants = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     get_or_create_customer(vendor_phone, customer_name)
     now = _now_iso()
     db["udhari_transactions"].insert_one({
-        "vendor_phone": vendor_phone,
+        "vendor_phone": canonical,
         "customer_name": key,
         "tx_type": "credit",
         "amount": float(amount),
@@ -80,10 +85,11 @@ def add_udhari(vendor_phone: str, customer_name: str, amount: float, note: str =
         "created_at": now,
     })
     db["udhari"].update_one(
-        {"vendor_phone": vendor_phone, "customer_name": key},
+        {"vendor_phone": {"$in": variants}, "customer_name": key},
         {
             "$inc": {"total_due": amount, "total_given": amount},
             "$set": {
+                "vendor_phone": canonical,
                 "updated_at": now,
                 "is_settled": False,
                 "customer_name_display": customer_name.strip(),
@@ -98,6 +104,8 @@ def record_payment(vendor_phone: str, customer_name: str, amount: float, note: s
         raise ValueError(f"Payment amount must be positive, got {amount}")
     db = get_db()
     key = _normalize_name(customer_name)
+    canonical = _normalize_phone(vendor_phone) if vendor_phone != "web-client" else "web-client"
+    variants = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     customer = get_or_create_customer(vendor_phone, customer_name)
     current_due = float(customer.get("total_due", 0))
     actual_payment = min(amount, current_due)
@@ -105,7 +113,7 @@ def record_payment(vendor_phone: str, customer_name: str, amount: float, note: s
         return customer
     now = _now_iso()
     db["udhari_transactions"].insert_one({
-        "vendor_phone": vendor_phone,
+        "vendor_phone": canonical,
         "customer_name": key,
         "tx_type": "payment",
         "amount": float(actual_payment),
@@ -114,10 +122,10 @@ def record_payment(vendor_phone: str, customer_name: str, amount: float, note: s
     })
     new_due = max(0.0, current_due - actual_payment)
     db["udhari"].update_one(
-        {"vendor_phone": vendor_phone, "customer_name": key},
+        {"vendor_phone": {"$in": variants}, "customer_name": key},
         {
             "$inc": {"total_paid": actual_payment},
-            "$set": {"total_due": new_due, "updated_at": now, "is_settled": new_due == 0.0},
+            "$set": {"vendor_phone": canonical, "total_due": new_due, "updated_at": now, "is_settled": new_due == 0.0},
         },
     )
     return get_customer_summary(vendor_phone, customer_name)
@@ -126,24 +134,21 @@ def record_payment(vendor_phone: str, customer_name: str, amount: float, note: s
 def get_customer_summary(vendor_phone: str, customer_name: str) -> Dict[str, Any]:
     db = get_db()
     key = _normalize_name(customer_name)
-    doc = db["udhari"].find_one({"vendor_phone": vendor_phone, "customer_name": key}, {"_id": 0})
-    if not doc and vendor_phone != "web-client":
-        doc = db["udhari"].find_one({"vendor_phone": "web-client", "customer_name": key}, {"_id": 0})
+    phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
+    doc = db["udhari"].find_one({"vendor_phone": {"$in": phones}, "customer_name": key}, {"_id": 0})
     return doc or {}
 
 
 def list_customers(vendor_phone: str, only_outstanding: bool = False, search: str = "") -> List[Dict[str, Any]]:
     db = get_db()
-    phones = [vendor_phone]
-    if vendor_phone != "web-client":
-        phones.append("web-client")
+    phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     query: Dict[str, Any] = {"vendor_phone": {"$in": phones}}
     if only_outstanding:
         query["total_due"] = {"$gt": 0}
     if search.strip():
         query["customer_name"] = {"$regex": _normalize_name(search), "$options": "i"}
     docs = list(db["udhari"].find(query, {"_id": 0}).sort("total_due", -1).limit(200))
-    # Deduplicate in case same customer is in both phone keys
+    # Deduplicate in case same customer is in multiple phone keys
     seen = set()
     unique = []
     for d in docs:
@@ -157,9 +162,7 @@ def list_customers(vendor_phone: str, only_outstanding: bool = False, search: st
 def get_customer_transactions(vendor_phone: str, customer_name: str, limit: int = 50) -> List[Dict[str, Any]]:
     db = get_db()
     key = _normalize_name(customer_name)
-    phones = [vendor_phone]
-    if vendor_phone != "web-client":
-        phones.append("web-client")
+    phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     return list(
         db["udhari_transactions"]
         .find({"vendor_phone": {"$in": phones}, "customer_name": key}, {"_id": 0})
@@ -170,9 +173,7 @@ def get_customer_transactions(vendor_phone: str, customer_name: str, limit: int 
 
 def get_recent_vendor_transactions(vendor_phone: str, limit: int = 20) -> List[Dict[str, Any]]:
     db = get_db()
-    phones = [vendor_phone]
-    if vendor_phone != "web-client":
-        phones.append("web-client")
+    phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     return list(
         db["udhari_transactions"]
         .find({"vendor_phone": {"$in": phones}}, {"_id": 0})
@@ -183,9 +184,7 @@ def get_recent_vendor_transactions(vendor_phone: str, limit: int = 20) -> List[D
 
 def get_udhari_totals(vendor_phone: str) -> Dict[str, Any]:
     db = get_db()
-    phones = [vendor_phone]
-    if vendor_phone != "web-client":
-        phones.append("web-client")
+    phones = get_phone_variants(vendor_phone) if vendor_phone != "web-client" else ["web-client"]
     pipeline = [
         {"$match": {"vendor_phone": {"$in": phones}}},
         {
