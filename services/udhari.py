@@ -585,6 +585,7 @@ def handle_all_udhari_report(vendor_phone: str, vendor_name: str = "") -> Tuple[
 def match_udhari_query_or_report(text: str) -> Optional[Tuple[str, Optional[str]]]:
     """
     Deterministic fast-path matching for customer udhari queries and full report requests.
+    Supports English, Hinglish, and Devanagari Hindi / Marathi.
     Returns:
       ("UDHARI_REPORT", None)
       ("UDHARI_QUERY", customer_name)
@@ -592,35 +593,78 @@ def match_udhari_query_or_report(text: str) -> Optional[Tuple[str, Optional[str]
     """
     cleaned = text.strip().lower()
 
-    # 1. Overall Udhari report requests
+    # 1. Overall Udhari report requests (Latin + Devanagari)
     report_keywords = [
         "sab ki udhari", "sabki udhari", "sab ke udhari", "sabka hisaab", "sabka hisab",
         "sab ka hisaab", "sab ka hisab", "udhari report", "udhari ka report",
         "udhari ki report", "udhari list", "udhari register", "kitna udhari baki",
         "total udhari", "kul udhari", "udhari ka hisab", "udhari ka hisaab",
         "kiska kitna baki", "kiske kitne baki", "udhari pdf", "khata report",
-        "kisko kitna diya", "kiske paas kitna baki",
+        "kisko kitna diya", "kiske paas kitna baki", "all udhari", "full udhari",
+        # Devanagari
+        "सबकी उधारी", "सब के उधारी", "सब की उधारी", "उधारी रिपोर्ट", "उधारी की रिपोर्ट",
+        "उधारी का रिपोर्ट", "कुल उधारी", "उधारी रजिस्टर", "उधारी लिस्ट", "सबका हिसाब",
+        "सब का हिसाब", "उधारी का हिसाब", "उधारी हिसाब", "खाता रिपोर्ट", "उधारी पीडीएफ",
     ]
     if any(k in cleaned for k in report_keywords):
         return ("UDHARI_REPORT", None)
 
-    # 2. Customer-specific queries
+    # 2. Customer-specific queries (Latin + Devanagari)
     patterns = [
-        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ki|ke|ka)\s+udhari",
-        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ka|ki|ke)\s+(?:hisaab|hisab)",
-        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ka|ki|ke)\s+kitn[a-z\u0900-\u097F]*\s+(?:baki|baaki)",
-        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ka|ki|ke)\s+khata",
-        r"(?:udhari|hisaab|hisab)\s+(?:of|dekhna|batao)\s+([a-zA-Z\u0900-\u097F]+)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ki|ke|ka|की|के|का)\s+(?:udhari|उधारी|उधार)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ka|ki|ke|का|की|के)\s+(?:hisaab|hisab|हिसाब|खाता)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ka|ki|ke|का|की|के)\s+kitn[a-z\u0900-\u097F]*\s+(?:baki|baaki|बाकी|बकाया)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ka|ki|ke|का|की|के)\s+khata",
+        r"(?:udhari|hisaab|hisab|उधारी|हिसाब|खाता)\s+(?:of|dekhna|batao|बताओ|दिखाओ)\s+([a-zA-Z\u0900-\u097F]+)",
     ]
     for pat in patterns:
         m = re.search(pat, cleaned)
         if m:
             name = m.group(1).strip()
-            if name in ("sab", "sabka", "sabki", "sabke", "kiska", "kiske", "total", "all"):
+            if name.lower() in ("sab", "sabka", "sabki", "sabke", "kiska", "kiske", "total", "all", "सब", "सबका", "सबकी", "सबके"):
                 return ("UDHARI_REPORT", None)
-            if name in ("meri", "mera", "apna", "apni", "store", "dukaan"):
+            if name.lower() in ("meri", "mera", "apna", "apni", "store", "dukaan", "मेरी", "मेरा", "अपना", "अपनी"):
                 return ("UDHARI_REPORT", None)
             return ("UDHARI_QUERY", name.title())
 
     return None
+
+
+def match_udhari_action(text: str) -> Optional[Tuple[str, str, float]]:
+    """
+    Deterministic fast-path matching for adding credit or recording payment.
+    Returns:
+      ("UDHARI_PAYMENT", customer_name, amount)
+      ("UDHARI_ADD", customer_name, amount)
+      None (if not matched)
+    """
+    cleaned = text.strip().lower()
+
+    # 1. Payment received (wapas, chukaye, jama, paid, de diye)
+    # e.g., "Ramesh ne 200 wapas diye", "रमेश ने 200 रुपये वापस दिए", "Ramesh paid 500"
+    pay_patterns = [
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ne|se|ने|से)\s+(\d+(?:\.\d+)?)\s*(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*(?:wapas|vaapas|wapis|vapis|de|diye|diya|chukaye|jama|bheje|वापस|दिए|दिया|जमा|चुकाए)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:paid|returned)\s*(\d+(?:\.\d+)?)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:se|से)\s+(\d+(?:\.\d+)?)\s*(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*(?:aaye|mile|aaya|आए|मिले)",
+    ]
+    for pat in pay_patterns:
+        m = re.search(pat, cleaned)
+        if m:
+            name, amt = m.group(1).strip(), float(m.group(2))
+            return ("UDHARI_PAYMENT", name.title(), amt)
+
+    # 2. Udhari given (udhari diya, udhari pe diya, baki)
+    # e.g., "Ramesh ko 500 rupay udhari diye", "रमेश को 500 रुपये उधार दिए"
+    add_patterns = [
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ko|ने|को)?\s*(\d+(?:\.\d+)?)\s*(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*(?:ki|ke|ka)?\s*(?:udhari|udhar|udhaari|उधारी|उधार|baaki|baki)",
+        r"([a-zA-Z\u0900-\u097F]+)\s+(?:ko|ने|को)\s*(\d+(?:\.\d+)?)\s*(?:rupaye|rupay|rupiay|rupiye|rupya|rupee|rupees|rs|रुपये|रुपए)?\s*(?:diye|diya|दिए|दिया)\s*(?:udhari|udhar|udhaari|उधारी|उधार)?",
+    ]
+    for pat in add_patterns:
+        m = re.search(pat, cleaned)
+        if m:
+            name, amt = m.group(1).strip(), float(m.group(2))
+            return ("UDHARI_ADD", name.title(), amt)
+
+    return None
+
 

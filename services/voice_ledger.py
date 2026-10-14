@@ -236,37 +236,68 @@ _whisper_model_name = None
 
 
 def _get_whisper_model():
-    """Load the local Whisper model once and cache it."""
+    """Load local Whisper model as fallback (uses 'base' by default so CPU doesn't freeze)."""
     global _whisper_model, _whisper_model_name
     import whisper as openai_whisper
 
-    # Use large-v3 for best Hindi/Marathi accuracy (you have it downloaded at ~/.cache/whisper/)
-    model_name = os.environ.get("WHISPER_LOCAL_MODEL", "large-v3")
+    model_name = os.environ.get("WHISPER_LOCAL_MODEL", "base")
     if _whisper_model is None or _whisper_model_name != model_name:
-        logger.info("Loading local Whisper model: %s (this may take a moment)...", model_name)
+        logger.info("Loading local Whisper model: %s (fallback)...", model_name)
         _whisper_model = openai_whisper.load_model(model_name)
         _whisper_model_name = model_name
-        logger.info("Whisper model '%s' loaded successfully.", model_name)
+        logger.info("Local Whisper model '%s' loaded successfully.", model_name)
     return _whisper_model
 
 
 def transcribe_audio(audio_path: Path) -> Dict[str, str]:
-    """Transcribe audio using the LOCAL Whisper model (not Groq cloud)."""
-    model = _get_whisper_model()
-    logger.info("Transcribing with local Whisper (%s): %s", _whisper_model_name, audio_path.name)
+    """Transcribe audio using Groq Whisper API (fast cloud transcription), falling back to local Whisper."""
+    settings = get_settings()
 
-    result = model.transcribe(
-        str(audio_path),
-        language="hi",       # Force Hindi — prevents misdetecting as English
-        task="transcribe",
-        fp16=False,          # CPU doesn't support FP16
-        initial_prompt="Hindi, Marathi, Hinglish mein business transaction. Chai bechi 500 rupay, doodh pe 200 kharch.",
-    )
+    # 1. Primary: Groq Cloud Whisper API (lightning-fast, ~0.3-0.5s)
+    if settings.groq_api_key:
+        try:
+            whisper_model = settings.groq_whisper_model or "whisper-large-v3-turbo"
+            logger.info("Transcribing with Groq Whisper API (%s): %s", whisper_model, audio_path.name)
+            with open(audio_path, "rb") as af:
+                resp = requests.post(
+                    GROQ_TRANSCRIPTIONS_URL,
+                    headers={"Authorization": f"Bearer {settings.groq_api_key}"},
+                    files={"file": (audio_path.name, af, "audio/mpeg")},
+                    data={
+                        "model": whisper_model,
+                        "language": "hi",
+                        "prompt": "Hindi, Marathi, Hinglish business transactions: Chai bechi, udhari diya, hisaab, baki.",
+                    },
+                    timeout=25,
+                )
+            if resp.status_code == 200:
+                text = (resp.json().get("text") or "").strip()
+                logger.info("Groq Whisper result: %s", text[:200])
+                if text:
+                    return {"text": text, "language": "hi"}
+            else:
+                logger.warning("Groq Whisper API returned %s: %s", resp.status_code, resp.text)
+        except Exception as e:
+            logger.warning("Groq Whisper API call failed: %s, falling back to local Whisper", e)
 
-    text = (result.get("text") or "").strip()
-    language = (result.get("language") or "hi").strip().lower()
-    logger.info("Local Whisper result — lang: %s, text: %s", language, text[:200])
-    return {"text": text, "language": language}
+    # 2. Fallback: local Whisper model
+    try:
+        model = _get_whisper_model()
+        logger.info("Transcribing with local Whisper: %s", audio_path.name)
+        result = model.transcribe(
+            str(audio_path),
+            language="hi",
+            task="transcribe",
+            fp16=False,
+            initial_prompt="Hindi, Marathi, Hinglish mein business transaction.",
+        )
+        text = (result.get("text") or "").strip()
+        language = (result.get("language") or "hi").strip().lower()
+        logger.info("Local Whisper result: %s", text[:200])
+        return {"text": text, "language": language}
+    except Exception as exc:
+        logger.error("Local Whisper transcription failed: %s", exc)
+        return {"text": "", "language": "hi"}
 
 
 def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
@@ -362,43 +393,69 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
     )
 
 
-    payload: Dict[str, Any] = {
-        "model": settings.groq_llm_model,
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": "Transcript: " + transcript,
-            },
-        ],
-    }
+    candidate_models = []
+    preferred = settings.groq_llm_model or "openai/gpt-oss-20b"
+    for m in [preferred, "qwen/qwen3.8-27b", "openai/gpt-oss-120b", "openai/gpt-oss-20b"]:
+        if m and m not in candidate_models:
+            candidate_models.append(m)
 
     headers = {
         "Authorization": f"Bearer {settings.groq_api_key}",
         "Content-Type": "application/json",
     }
 
-    response = requests.post(
-        GROQ_CHAT_COMPLETIONS_URL,
-        headers=headers,
-        json=payload,
-        timeout=60,
-    )
+    raw_content = ""
+    for model_name in candidate_models:
+        payload: Dict[str, Any] = {
+            "model": model_name,
+            "temperature": 0,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": "Transcript: " + transcript,
+                },
+            ],
+        }
 
-    # Some models may reject strict response_format. Retry once without it.
-    if response.status_code == 400 and "response_format" in response.text:
-        payload.pop("response_format", None)
-        response = requests.post(
-            GROQ_CHAT_COMPLETIONS_URL,
-            headers=headers,
-            json=payload,
-            timeout=60,
-        )
+        try:
+            response = requests.post(
+                GROQ_CHAT_COMPLETIONS_URL,
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
 
-    if response.status_code >= 400:
-        logger.warning("Groq extraction call failed: %s", response.text)
+            # Some models may reject strict response_format. Retry once without it.
+            if response.status_code == 400 and "response_format" in response.text:
+                payload.pop("response_format", None)
+                response = requests.post(
+                    GROQ_CHAT_COMPLETIONS_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                )
+
+            if response.status_code == 200:
+                raw_content = (
+                    response.json()
+                    .get("choices", [{}])[0]
+                    .get("message", {})
+                    .get("content", "")
+                )
+                if raw_content:
+                    break
+            else:
+                logger.warning(
+                    "Groq model '%s' failed (%s): %s — trying fallback candidate...",
+                    model_name, response.status_code, response.text[:200]
+                )
+        except Exception as req_exc:
+            logger.warning("Groq request error for model '%s': %s", model_name, req_exc)
+
+    if not raw_content:
+        logger.error("All Groq extraction candidate models failed for transcript: %s", transcript[:100])
         return None
 
     try:
@@ -1185,7 +1242,7 @@ def run_instant_stock_alert_job() -> int:
 
 
 def _looks_like_inventory_request(transcript: str) -> bool:
-    """Best-effort keyword detector for inventory view requests."""
+    """Best-effort keyword detector for inventory view requests (Latin + Devanagari)."""
     text = " ".join((transcript or "").strip().lower().split())
     if not text:
         return False
@@ -1198,6 +1255,7 @@ def _looks_like_inventory_request(transcript: str) -> bool:
         "stock dikhao",
         "stock dekh",
         "stock dikh",
+        "stock batao",
         "mera stock",
         "meri inventory",
         "mere inventory",
@@ -1209,6 +1267,14 @@ def _looks_like_inventory_request(transcript: str) -> bool:
         "show my inventory",
         "show stock",
         "available stock",
+        # Devanagari
+        "स्टॉक",
+        "इन्वेंट्री",
+        "इन्वेंटरी",
+        "कितना माल",
+        "माल कितना",
+        "स्टॉक बताओ",
+        "स्टॉक दिखाओ",
     )
 
     update_or_transaction_markers = (
@@ -1221,6 +1287,9 @@ def _looks_like_inventory_request(transcript: str) -> bool:
         "bech",
         "sold",
         "kharch",
+        "बेच",
+        "खर्च",
+        "स्टॉक बढ़ाओ",
     )
 
     has_request = any(marker in text for marker in request_markers)
@@ -1230,12 +1299,14 @@ def _looks_like_inventory_request(transcript: str) -> bool:
 
 def _looks_like_pnl_report_request(text: str) -> bool:
     cleaned = text.strip().lower()
-    if "udhari" in cleaned or "udhaar" in cleaned or "khata" in cleaned:
+    if any(u in cleaned for u in ("udhari", "udhaar", "khata", "उधारी", "उधार", "खाता")):
         return False
     triggers = [
         "report", "pnl", "profit and loss", "profit loss", "mera hisaab", "mera hisab",
         "hisaab bhejo", "hisab bhejo", "weekly report", "p&l", "statement", "balance sheet",
         "mera record", "record bhejo", "record do", "hisaab do", "hisab do",
+        # Devanagari
+        "रिपोर्ट", "प्रॉफिट", "मुनाफा", "स्टेटमेंट", "नफा नुकसान", "पीएनएल",
     ]
     return any(t in cleaned for t in triggers)
 
@@ -1272,9 +1343,16 @@ def process_voice_message(phone: str, media_id: str) -> str:
     try:
         from services.udhari import (
             match_udhari_query_or_report,
+            match_udhari_action,
             format_customer_query_reply,
             handle_all_udhari_report,
+            add_udhari,
+            record_payment,
+            format_udhari_added_msg,
+            format_payment_received_msg,
         )
+
+        # 1. Check Udhari Query or Report
         udhari_fast = match_udhari_query_or_report(transcript)
         if udhari_fast:
             u_intent, u_name = udhari_fast
@@ -1295,6 +1373,18 @@ def process_voice_message(phone: str, media_id: str) -> str:
                     except Exception as wa_exc:
                         logger.warning("Failed to send WhatsApp Udhari PDF in fast path: %s", wa_exc)
                 return caption
+
+        # 2. Check Udhari Add or Payment action
+        udhari_act = match_udhari_action(transcript)
+        if udhari_act:
+            act_type, c_name, c_amt = udhari_act
+            if act_type == "UDHARI_ADD":
+                summary = add_udhari(vendor_phone=phone, customer_name=c_name, amount=c_amt, note=transcript[:100])
+                return format_udhari_added_msg(customer_name=c_name, amount=c_amt, total_due=float(summary.get("total_due", 0)))
+            elif act_type == "UDHARI_PAYMENT":
+                summary = record_payment(vendor_phone=phone, customer_name=c_name, amount=c_amt, note=transcript[:100])
+                return format_payment_received_msg(customer_name=c_name, paid=c_amt, remaining=float(summary.get("total_due", 0)))
+
     except Exception as fast_exc:
         logger.warning("Udhari fast-path check failed: %s", fast_exc)
 

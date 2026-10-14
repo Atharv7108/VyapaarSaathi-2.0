@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 
 def _to_bool(value: Optional[str], default: bool = False) -> bool:
@@ -53,6 +53,7 @@ class Settings:
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    load_dotenv(override=True)
     return Settings(
         whatsapp_api_token=os.getenv("WHATSAPP_API_TOKEN", ""),
         whatsapp_business_account_id=os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", ""),
@@ -61,7 +62,7 @@ def get_settings() -> Settings:
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
         mongodb_uri=os.getenv("MONGODB_URI", ""),
         mongodb_db_name=os.getenv("MONGODB_DB_NAME", "vyapaarsaathi"),
-        groq_llm_model=os.getenv("GROQ_LLM_MODEL", "groq/compound-mini"),
+        groq_llm_model=os.getenv("GROQ_LLM_MODEL", "openai/gpt-oss-20b"),
         groq_whisper_model=os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo"),
         ffmpeg_binary=os.getenv("FFMPEG_BINARY", "ffmpeg"),
 
