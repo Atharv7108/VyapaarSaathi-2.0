@@ -16,6 +16,8 @@ import {
   ArrowDownLeft,
   ArrowUpRight,
   Filter,
+  FileText,
+  Loader2,
 } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -457,6 +459,25 @@ export default function Udhari() {
     }
   }
 
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+
+  async function handleDownloadPdf() {
+    setDownloadingPdf(true);
+    try {
+      const res = await fetch(`${API}/udhari/report/pdf?vendor_phone=${encodeURIComponent(vendorPhone)}`);
+      const data = await res.json();
+      if (data.pdf_url) {
+        window.open(data.pdf_url, "_blank");
+      } else {
+        alert(isHindi ? "PDF report generate karne mein dikkat aayi." : "Could not generate PDF report.");
+      }
+    } catch {
+      alert(isHindi ? "PDF generate nahi ho payi." : "Failed to generate PDF.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  }
+
   const kpiCards = [
     {
       icon: <TrendingDown className="w-4 h-4 text-red-400" />,
@@ -496,13 +517,28 @@ export default function Udhari() {
             {isHindi ? "Customer credit track karo" : "Track customer credit & payments"}
           </p>
         </div>
-        <button
-          onClick={() => setAddModal(true)}
-          className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-4 py-2.5 rounded-xl transition shadow-sm shadow-orange-500/20"
-        >
-          <Plus className="w-4 h-4" />
-          {isHindi ? "Udhari Do" : "Add Udhari"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleDownloadPdf}
+            disabled={downloadingPdf}
+            className="flex items-center gap-2 border border-slate-200 hover:bg-slate-50 text-slate-700 text-sm font-semibold px-3.5 py-2.5 rounded-xl transition bg-white shadow-sm disabled:opacity-50"
+            title={isHindi ? "Udhari PDF Report Download Karein" : "Download Udhari PDF Report"}
+          >
+            {downloadingPdf ? (
+              <Loader2 className="w-4 h-4 animate-spin text-orange-500" />
+            ) : (
+              <FileText className="w-4 h-4 text-orange-500" />
+            )}
+            <span className="hidden sm:inline">{isHindi ? "PDF Report" : "PDF Report"}</span>
+          </button>
+          <button
+            onClick={() => setAddModal(true)}
+            className="flex items-center gap-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold px-4 py-2.5 rounded-xl transition shadow-sm shadow-orange-500/20"
+          >
+            <Plus className="w-4 h-4" />
+            {isHindi ? "Udhari Do" : "Add Udhari"}
+          </button>
+        </div>
       </div>
 
       {/* KPI Cards */}
@@ -519,21 +555,21 @@ export default function Udhari() {
         ))}
       </div>
 
-      {/* Voice Hint Banner */}
+      {/* Voice & WhatsApp Hint Banner */}
       <div className="flex items-start gap-3 bg-orange-50 border border-orange-100 rounded-2xl p-4">
         <div className="w-8 h-8 rounded-xl bg-orange-500 flex items-center justify-center shrink-0">
           <span className="text-lg">🎤</span>
         </div>
-        <div>
-          <p className="text-xs font-bold text-orange-800">
-            {isHindi ? "Voice se Udhari Record Karo!" : "Record Udhari by Voice!"}
+        <div className="space-y-1">
+          <p className="text-xs font-bold text-orange-950">
+            {isHindi ? "WhatsApp Voice ya Text se Khata Chalao!" : "Manage Khata via Voice or Text on WhatsApp!"}
           </p>
-          <p className="text-xs text-orange-600 mt-0.5">
-            WhatsApp pe boliye:{" "}
-            <em>"Ramesh ko 500 ka udhari diya"</em>{" "}
-            ya{" "}
-            <em>"Ramesh ne 200 diye"</em>
-          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-xs text-orange-900">
+            <p>• <em>"Ramesh ko 500 ka udhari diya"</em> <span className="text-orange-700">(Naya credit)</span></p>
+            <p>• <em>"Ramesh ne 200 diye"</em> <span className="text-orange-700">(Payment received)</span></p>
+            <p>• <em>"Ramesh ke udhari batao"</em> <span className="text-orange-700">(Customer hisaab)</span></p>
+            <p>• <em>"Sab ke udhari batao / Udhari report do"</em> <span className="text-orange-700 font-semibold">(PDF Report)</span></p>
+          </div>
         </div>
       </div>
 

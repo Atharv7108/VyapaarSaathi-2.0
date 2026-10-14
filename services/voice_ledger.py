@@ -45,7 +45,17 @@ _stock_alert_state: Dict[str, str] = {}
 
 
 class ExtractedEntry(BaseModel):
-    intent: Literal["ADD_ENTRY", "STOCK_UPDATE", "PRICE_UPDATE", "GET_REPORT", "GET_INVENTORY", "UDHARI_ADD", "UDHARI_PAYMENT"] = "ADD_ENTRY"
+    intent: Literal[
+        "ADD_ENTRY",
+        "STOCK_UPDATE",
+        "PRICE_UPDATE",
+        "GET_REPORT",
+        "GET_INVENTORY",
+        "UDHARI_ADD",
+        "UDHARI_PAYMENT",
+        "UDHARI_QUERY",
+        "UDHARI_REPORT",
+    ] = "ADD_ENTRY"
     # ADD_ENTRY fields (required for ADD_ENTRY, ignored for others)
     amount: Optional[float] = Field(default=None)
     type: Optional[Literal["income", "expense"]] = Field(default=None)
@@ -55,7 +65,7 @@ class ExtractedEntry(BaseModel):
     quantity: Optional[float] = Field(default=None)
     # Price — used by PRICE_UPDATE
     price_per_unit: Optional[float] = Field(default=None)
-    # Customer credit (Udhari) — used by UDHARI_ADD and UDHARI_PAYMENT
+    # Customer credit (Udhari) — used by UDHARI_ADD, UDHARI_PAYMENT, UDHARI_QUERY
     customer_name: Optional[str] = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
@@ -79,9 +89,12 @@ class ExtractedEntry(BaseModel):
         elif self.intent == "PRICE_UPDATE":
             if self.price_per_unit is None or self.price_per_unit <= 0:
                 raise ValueError("PRICE_UPDATE requires price_per_unit > 0")
-        elif self.intent in {"GET_REPORT", "GET_INVENTORY"}:
+        elif self.intent in {"GET_REPORT", "GET_INVENTORY", "UDHARI_REPORT"}:
             # No extra validation needed — just a request
             pass
+        elif self.intent == "UDHARI_QUERY":
+            if not self.customer_name or not self.customer_name.strip():
+                self.intent = "UDHARI_REPORT"
         elif self.intent in {"UDHARI_ADD", "UDHARI_PAYMENT"}:
             if not self.customer_name or not self.customer_name.strip():
                 raise ValueError(f"{self.intent} requires customer_name")
@@ -322,6 +335,28 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
         "  'Ramesh ne 500 diya' → intent:'UDHARI_PAYMENT', customer_name:'Ramesh', amount:500\n"
         "  'Suresh ne apna udhari chukaya, 300 diya' → intent:'UDHARI_PAYMENT', customer_name:'Suresh', amount:300\n"
         "  'Priya ne 100 diye partial payment' → intent:'UDHARI_PAYMENT', customer_name:'Priya', amount:100\n\n"
+
+        "=== intent: UDHARI_QUERY (vendor asks about a specific customer's balance/udhari) ===\n"
+        "Use when vendor asks about how much a specific customer owes or asks to show their udhari/hisaab.\n"
+        "Keys: intent:'UDHARI_QUERY', customer_name:'<name>'.\n"
+        "EXAMPLES:\n"
+        "  'Ramesh ki udhari batao' → intent:'UDHARI_QUERY', customer_name:'Ramesh'\n"
+        "  'Ramesh ke udhari batao' → intent:'UDHARI_QUERY', customer_name:'Ramesh'\n"
+        "  'Ramesh ka kitna baki hai' → intent:'UDHARI_QUERY', customer_name:'Ramesh'\n"
+        "  'Suresh ka hisaab batao' → intent:'UDHARI_QUERY', customer_name:'Suresh'\n"
+        "  'Priya ki udhari kitni hai' → intent:'UDHARI_QUERY', customer_name:'Priya'\n\n"
+
+        "=== intent: UDHARI_REPORT (vendor asks for ALL customers udhari / report / list / pdf) ===\n"
+        "Use when vendor asks for all udhari, overall udhari report, udhari register, or pdf.\n"
+        "Keys: intent:'UDHARI_REPORT'. (No customer_name or set to null).\n"
+        "EXAMPLES:\n"
+        "  'Sab ki udhari batao' → intent:'UDHARI_REPORT'\n"
+        "  'Sab ke udhari batao' → intent:'UDHARI_REPORT'\n"
+        "  'Udhari ka report do' → intent:'UDHARI_REPORT'\n"
+        "  'Udhari list bhejo' → intent:'UDHARI_REPORT'\n"
+        "  'Udhari ka hisaab bhejo' → intent:'UDHARI_REPORT'\n"
+        "  'Kitna udhari baki hai total report do' → intent:'UDHARI_REPORT'\n"
+        "  'Udhari report pdf bhejo' → intent:'UDHARI_REPORT'\n\n"
 
         "Return ONLY valid JSON. No explanation.\n"
     )
@@ -1221,6 +1256,36 @@ def process_voice_message(phone: str, media_id: str) -> str:
             logger.error("Inventory keyword path failed: %s", inv_exc)
             return "⚠️ Inventory laane mein problem aayi. Kripya dobara try kijiye."
 
+    # Fast path: handle Udhari query or report requests deterministically
+    try:
+        from services.udhari import (
+            match_udhari_query_or_report,
+            format_customer_query_reply,
+            handle_all_udhari_report,
+        )
+        udhari_fast = match_udhari_query_or_report(transcript)
+        if udhari_fast:
+            u_intent, u_name = udhari_fast
+            if u_intent == "UDHARI_QUERY" and u_name:
+                return format_customer_query_reply(vendor_phone=phone, customer_name=u_name)
+            elif u_intent == "UDHARI_REPORT":
+                caption, pdf_url = handle_all_udhari_report(vendor_phone=phone)
+                if pdf_url and phone.startswith("whatsapp:"):
+                    try:
+                        date_label = datetime.now().strftime("%d_%b_%Y")
+                        send_whatsapp_reply(
+                            to_phone=phone,
+                            body=caption,
+                            media_url=pdf_url,
+                            filename=f"Udhari_Report_{date_label}.pdf",
+                        )
+                        return "📄 Aapka Udhari Report PDF WhatsApp par bhej diya gaya hai! Upar check karein."
+                    except Exception as wa_exc:
+                        logger.warning("Failed to send WhatsApp Udhari PDF in fast path: %s", wa_exc)
+                return caption
+    except Exception as fast_exc:
+        logger.warning("Udhari fast-path check failed: %s", fast_exc)
+
     extracted = extract_json(transcript)
     if not extracted:
         return FALLBACK_RESPONSE
@@ -1278,6 +1343,39 @@ def process_voice_message(phone: str, media_id: str) -> str:
             except Exception as udhari_exc:
                 logger.error("Udhari intent failed: %s", udhari_exc)
                 return "⚠️ Udhari update mein problem aayi. Kripya dobara boliye."
+
+        if intent == "UDHARI_QUERY":
+            try:
+                from services.udhari import format_customer_query_reply, handle_all_udhari_report
+                customer_name = (entry_data.get("customer_name") or "").strip()
+                if not customer_name or customer_name.lower() in ("sab", "all", "sabka", "sabki", "sabke", "kiska", "kiske"):
+                    intent = "UDHARI_REPORT"
+                else:
+                    return format_customer_query_reply(vendor_phone=phone, customer_name=customer_name)
+            except Exception as udhari_exc:
+                logger.error("UDHARI_QUERY failed: %s", udhari_exc)
+                return "⚠️ Customer ka hisaab nikalne mein problem aayi. Kripya dobara boliye."
+
+        if intent == "UDHARI_REPORT":
+            try:
+                from services.udhari import handle_all_udhari_report
+                caption, pdf_url = handle_all_udhari_report(vendor_phone=phone)
+                if pdf_url and phone.startswith("whatsapp:"):
+                    try:
+                        date_label = datetime.now().strftime("%d_%b_%Y")
+                        send_whatsapp_reply(
+                            to_phone=phone,
+                            body=caption,
+                            media_url=pdf_url,
+                            filename=f"Udhari_Report_{date_label}.pdf",
+                        )
+                        return "📄 Aapka Udhari Report PDF WhatsApp par bhej diya gaya hai! Upar check karein."
+                    except Exception as wa_exc:
+                        logger.warning("Failed to send WhatsApp Udhari PDF: %s", wa_exc)
+                return caption
+            except Exception as udhari_exc:
+                logger.error("UDHARI_REPORT failed: %s", udhari_exc)
+                return "⚠️ Udhari report generate karne mein problem aayi. Kripya dobara try kijiye."
 
         if intent == "GET_REPORT":
             try:

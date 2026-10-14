@@ -365,7 +365,41 @@ def _handle_text_message(sender: str, text: str) -> None:
     except Exception as exc:
         logger.warning("Text onboarding handler failed: %s", exc)
 
-    # Active vendor — text messages not supported for entries
+    # Active vendor: check if text message is an Udhari query or report request
+    try:
+        from services.udhari import (
+            match_udhari_query_or_report,
+            format_customer_query_reply,
+            handle_all_udhari_report,
+        )
+        matched = match_udhari_query_or_report(text)
+        if matched:
+            m_intent, m_name = matched
+            if m_intent == "UDHARI_QUERY" and m_name:
+                reply_text = format_customer_query_reply(vendor_phone=sender, customer_name=m_name)
+                _send_safe_reply(sender, reply_text)
+                return
+            elif m_intent == "UDHARI_REPORT":
+                caption, pdf_url = handle_all_udhari_report(vendor_phone=sender)
+                if pdf_url and sender.startswith("whatsapp:"):
+                    try:
+                        from services.voice_ledger import send_whatsapp_reply
+                        date_label = datetime.now().strftime("%d_%b_%Y")
+                        send_whatsapp_reply(
+                            to_phone=sender,
+                            body=caption,
+                            media_url=pdf_url,
+                            filename=f"Udhari_Report_{date_label}.pdf",
+                        )
+                        return
+                    except Exception as wa_exc:
+                        logger.warning("Failed to send Udhari PDF over WhatsApp: %s", wa_exc)
+                _send_safe_reply(sender, caption)
+                return
+    except Exception as udhari_err:
+        logger.warning("Text udhari handler error: %s", udhari_err)
+
+    # Active vendor — text messages not supported for daily sales entries
     _send_safe_reply(sender, VOICE_PROMPT_MESSAGE)
 
 
@@ -2225,3 +2259,21 @@ def get_udhari_transactions(
     except Exception as exc:
         logger.exception("/udhari/transactions failed: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/udhari/report/pdf")
+def get_udhari_report_pdf(vendor_phone: str = "web-client") -> Dict[str, Any]:
+    """Generate and return download URL for Udhari Khata PDF report."""
+    from services.udhari import generate_udhari_pdf
+    phone_key = (vendor_phone or "web-client").strip()
+    if not phone_key.startswith("whatsapp:") and phone_key != "web-client":
+        phone_key = f"whatsapp:{phone_key}"
+    try:
+        pdf_url = generate_udhari_pdf(vendor_phone=phone_key)
+        if not pdf_url:
+            raise HTTPException(status_code=500, detail="Could not generate Udhari report PDF")
+        return {"pdf_url": pdf_url}
+    except Exception as exc:
+        logger.exception("Failed to generate Udhari report PDF: %s", exc)
+        raise HTTPException(status_code=500, detail=str(exc))
+
