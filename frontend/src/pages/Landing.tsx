@@ -2,7 +2,58 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore } from "../store/useStore";
 
-type Lang = "en" | "hi";
+type Lang = "en" | "hi" | "mr" | "hinglish";
+
+const MARATHI: Record<string, string> = {
+  "Features": "वैशिष्ट्ये", "How it Works": "हे कसे काम करते", "Demo": "डेमो", "About": "आमच्याबद्दल", "Help": "मदत", "Language": "भाषा",
+  "Sign In": "साइन इन", "Made for India's Dukandaars": "भारतातील दुकानदारांसाठी", "Sirf Bolo.": "फक्त बोला.", "Hum Likhenge.": "आम्ही लिहून घेऊ.",
+  "WhatsApp pe ek voice note bhejo — VyapaarSathi manages all your transactions, stock, and udhari. Free. Simple.": "WhatsApp वर एक व्हॉइस नोट पाठवा — VyapaarSathi तुमचे व्यवहार, साठा आणि उधारी सांभाळेल. मोफत. सोपे.",
+  "Start Free": "मोफत सुरू करा", "See How it Works →": "हे कसे काम करते ते पाहा →", "✅ No typing needed": "✅ टाइप करण्याची गरज नाही", "✅ Hindi, Marathi, Hinglish": "✅ हिंदी, मराठी, हिंग्लिश", "✅ Works on WhatsApp": "✅ WhatsApp वर चालते", "✅ 100% Free": "✅ १००% मोफत",
+  "Your language, your business — just one voice away.": "तुमची भाषा, तुमचा व्यवसाय — फक्त एका आवाजाच्या अंतरावर.", "● Online · WhatsApp": "● ऑनलाइन · WhatsApp", "● Online · WhatsApp Business": "● ऑनलाइन · WhatsApp Business", "Tap to speak...": "बोलण्यासाठी टॅप करा...",
+  "Simple hai, yaar": "एकदम सोपे", "How Does it Work? 🤔": "हे कसे काम करते? 🤔", "Everything in one place": "सगळे एका ठिकाणी", "Powerful Features 🚀": "उपयुक्त वैशिष्ट्ये 🚀", "See it in action": "प्रत्यक्ष वापरून पाहा", "WhatsApp Voice Note → Instant Data 💬": "WhatsApp व्हॉइस नोट → त्वरित माहिती 💬",
+  "Send a voice note — the VyapaarSathi bot understands and stores it in your dashboard instantly.": "व्हॉइस नोट पाठवा — VyapaarSathi बॉट ती समजून तुमच्या डॅशबोर्डमध्ये लगेच नोंदवतो.", "Scan to Open VyapaarSathi Bot": "VyapaarSathi बॉट उघडण्यासाठी स्कॅन करा", "or tap to open on your phone": "किंवा फोनवर उघडण्यासाठी टॅप करा", "💬 Open on WhatsApp": "💬 WhatsApp वर उघडा", "What happens when you send a voice note:": "व्हॉइस नोट पाठवल्यावर काय होते:",
+  "Our Story": "आमची गोष्ट", "Built for Bharat's Vendors 🏪": "भारतातील विक्रेत्यांसाठी बनवले 🏪", "VyapaarSathi was born from a simple observation: millions of small vendors across India manage their entire business in their head or in worn-out notebooks.": "एक साधी गोष्ट लक्षात आल्यावर VyapaarSathi ची सुरुवात झाली: भारतातील लाखो छोटे विक्रेते आपला संपूर्ण व्यवसाय मनात किंवा जुन्या वहीत सांभाळतात.",
+  "We built a solution that works the way vendors do — just speak in your language, and we handle the rest. No apps to learn, no typing required.": "विक्रेत्यांच्या पद्धतीने काम करणारा उपाय आम्ही तयार केला — तुमच्या भाषेत बोला, बाकी आम्ही सांभाळू. अॅप शिकण्याची किंवा टाइप करण्याची गरज नाही.", "Today, VyapaarSathi helps vendors track sales, manage stock, monitor udhari, and get AI-powered business insights — all through WhatsApp.": "आज VyapaarSathi विक्रेत्यांना विक्री, साठा, उधारी आणि AI व्यावसायिक माहिती WhatsApp द्वारे सांभाळण्यास मदत करतो.",
+  "Got Questions?": "काही प्रश्न आहेत?", "Help Centre ❓": "मदत केंद्र ❓", "Start Today — It's Free! 🚀": "आजच सुरू करा — मोफत! 🚀", "Join thousands of vendors already using VyapaarSathi to grow their business.": "व्यवसाय वाढवण्यासाठी VyapaarSathi वापरणाऱ्या हजारो विक्रेत्यांमध्ये सामील व्हा.", "🚀 Sign In — Free": "🚀 साइन इन — मोफत", "Made with ❤️ for India's vendors · © 2026 VyapaarSathi": "भारतातील विक्रेत्यांसाठी ❤️ ने बनवले · © 2026 VyapaarSathi", "Privacy": "गोपनीयता", "Terms": "अटी", "Contact": "संपर्क",
+  "Voice Bookkeeping": "व्हॉइस बुककीपिंग", "WhatsApp pe sirf bolo — we record everything. No typing, no app to learn.": "WhatsApp वर फक्त बोला — आम्ही सगळे नोंदवतो. टाइपिंग नाही, अॅप शिकण्याची गरज नाही.", "Smart Analytics": "स्मार्ट विश्लेषण", "Daily, weekly and monthly reports auto-generated. See exactly how you're earning.": "दैनिक, साप्ताहिक आणि मासिक अहवाल आपोआप तयार होतात. तुमची कमाई नेमकी पाहा.", "Udhari Tracker": "उधारी ट्रॅकर", "Who owes you and how much — crystal clear. Overdue alerts included.": "कोणाकडे किती येणे आहे ते स्पष्ट दिसेल. थकीत रकमेचे अलर्टही मिळतील.", "Stock Alerts": "साठा अलर्ट", "Get alerts when stock runs low. Never run out of your top-selling items.": "साठा कमी झाल्यावर अलर्ट मिळवा. जास्त विकल्या जाणाऱ्या वस्तू कधीही संपू देऊ नका.", "AI Market Insights": "AI बाजार माहिती", "Every morning, AI tells you which items sell most and when demand peaks.": "दररोज सकाळी कोणत्या वस्तू जास्त विकतात आणि मागणी कधी वाढते हे AI सांगतो.", "PDF Reports": "PDF अहवाल", "CA-ready reports in one click. Prepared for income tax, GST and more.": "एका क्लिकमध्ये CA-साठी तयार अहवाल. आयकर, GST आणि इतरांसाठी तयार.",
+  "Register & Get Connected": "नोंदणी करा आणि जोडा", "Sign up and get a dedicated WhatsApp number for your business in minutes.": "नोंदणी करा आणि काही मिनिटांत व्यवसायासाठी स्वतंत्र WhatsApp नंबर मिळवा.", "Just Speak in Your Language": "तुमच्या भाषेत बोला", "Send a voice note on WhatsApp — say what you sold, spent, or who owes you.": "WhatsApp वर व्हॉइस नोट पाठवा — काय विकले, किती खर्च केला किंवा कोणाकडे येणे आहे ते सांगा.", "See Your Full Dashboard": "संपूर्ण डॅशबोर्ड पाहा", "Open VyapaarSathi anytime to see complete data, reports, stock, and AI insights.": "संपूर्ण माहिती, अहवाल, साठा आणि AI सूचना पाहण्यासाठी कधीही VyapaarSathi उघडा.",
+  "You speak in Hindi, Marathi, or Hinglish": "तुम्ही हिंदी, मराठी किंवा हिंग्लिशमध्ये बोलता", "AI transcribes and understands the intent": "AI आवाजाचे मजकुरात रूपांतर करून अर्थ समजतो", "Data stored in your dashboard in real-time": "माहिती तुमच्या डॅशबोर्डमध्ये लगेच साठवली जाते", "Reports and insights update automatically": "अहवाल आणि सूचना आपोआप अपडेट होतात",
+  "How does voice recognition work?": "व्हॉइस ओळख कशी काम करते?", "You send a voice note on WhatsApp in Hindi, Marathi, or Hinglish. Our AI transcribes and understands the transaction and records it instantly.": "तुम्ही WhatsApp वर हिंदी, मराठी किंवा हिंग्लिशमध्ये व्हॉइस नोट पाठवता. आमचे AI व्यवहार समजून त्याची लगेच नोंद करते.", "Is my business data safe?": "माझ्या व्यवसायाची माहिती सुरक्षित आहे का?", "Yes, all data is encrypted and stored securely. Only you and your admin can access your business data.": "होय, सर्व माहिती एन्क्रिप्ट करून सुरक्षित साठवली जाते. फक्त तुम्ही आणि तुमचे अॅडमिन ती पाहू शकता.", "Can I use it without a smartphone?": "स्मार्टफोनशिवाय वापरता येईल का?", "VyapaarSathi works on any phone with WhatsApp — even basic smartphones. Very low data usage.": "WhatsApp असलेल्या कोणत्याही फोनवर VyapaarSathi चालते. डेटा वापरही खूप कमी आहे.", "What languages are supported?": "कोणत्या भाषा उपलब्ध आहेत?", "Currently Hindi, Marathi, Hinglish, and English. More regional languages coming soon.": "सध्या हिंदी, मराठी, हिंग्लिश आणि इंग्रजी उपलब्ध आहेत. आणखी प्रादेशिक भाषा लवकरच येतील.", "Is VyapaarSathi really free?": "VyapaarSathi खरोखर मोफत आहे का?", "Yes! The basic plan is 100% free. Premium features like advanced analytics are in paid plans.": "होय! मूलभूत योजना १००% मोफत आहे. प्रगत विश्लेषणासारखी प्रीमियम वैशिष्ट्ये सशुल्क योजनांमध्ये आहेत.", "How do I get started?": "सुरुवात कशी करू?", "Click Start Free below and sign in with your WhatsApp number. Done in under 2 minutes.": "खाली 'मोफत सुरू करा' वर क्लिक करून WhatsApp नंबरने साइन इन करा. दोन मिनिटांपेक्षा कमी वेळ लागेल.",
+  "Aam 5kg, 650 rupees mein becha": "आंबे ५ किलो, ६५० रुपयांना विकले", "✅ Recorded!\nAam 5kg → +₹650\nAaj ki kamai: ₹2,340": "✅ नोंद झाली!\nआंबे ५ किलो → +₹६५०\nआजची कमाई: ₹२,३४०", "Raju bhai ne 340 udhar liya": "राजूभाईंनी ३४० रुपये उधार घेतले", "📝 Udhari saved!\nRaju Bhai: ₹340\nTotal pending: ₹1,020": "📝 उधारी नोंदवली!\nराजूभाई: ₹३४०\nएकूण येणे: ₹१,०२०", "Kela ka stock khatam ho raha hai": "केळ्यांचा साठा संपत आला आहे", "⚠️ Stock alert set!\nKela: only 8 dozen left\nRestock reminder: 7am tomorrow": "⚠️ साठा अलर्ट सेट!\nकेळी: फक्त ८ डझन शिल्लक\nसाठा भरण्याची आठवण: उद्या सकाळी ७ वाजता",
+};
+
+const HINGLISH: Record<string, string> = {
+  "Features": "Features", "How it Works": "Kaise kaam karta hai", "Demo": "Demo", "About": "Hamare baare mein", "Help": "Madad", "Language": "Language", "Sign In": "Sign in",
+  "Made for India's Dukandaars": "India ke dukandaaron ke liye bana", "Sirf Bolo.": "Bas bolo.", "Hum Likhenge.": "Hum likh lenge.",
+  "WhatsApp pe ek voice note bhejo — VyapaarSathi manages all your transactions, stock, and udhari. Free. Simple.": "WhatsApp par ek voice note bhejo — VyapaarSathi tumhare transactions, stock aur udhari sambhalega. Free. Simple.", "Start Free": "Free shuru karo", "See How it Works →": "Dekho kaise kaam karta hai →", "✅ No typing needed": "✅ Typing ki zaroorat nahi", "✅ Hindi, Marathi, Hinglish": "✅ Hindi, Marathi, Hinglish", "✅ Works on WhatsApp": "✅ WhatsApp par chalta hai", "✅ 100% Free": "✅ 100% free", "Your language, your business — just one voice away.": "Tumhari language, tumhara business — bas ek awaaz door.",
+  "● Online · WhatsApp": "● Online · WhatsApp", "● Online · WhatsApp Business": "● Online · WhatsApp Business", "Tap to speak...": "Bolne ke liye tap karo...", "Simple hai, yaar": "Bilkul simple hai", "How Does it Work? 🤔": "Kaise kaam karta hai? 🤔", "Everything in one place": "Sab kuch ek jagah", "Powerful Features 🚀": "Powerful features 🚀", "See it in action": "Karke dekho", "WhatsApp Voice Note → Instant Data 💬": "WhatsApp voice note → turant data 💬",
+  "Send a voice note — the VyapaarSathi bot understands and stores it in your dashboard instantly.": "Voice note bhejo — VyapaarSathi bot samajhkar tumhare dashboard mein turant save karta hai.", "Scan to Open VyapaarSathi Bot": "VyapaarSathi Bot kholne ke liye scan karo", "or tap to open on your phone": "ya phone par kholne ke liye tap karo", "💬 Open on WhatsApp": "💬 WhatsApp par kholo", "What happens when you send a voice note:": "Voice note bhejne par kya hota hai:",
+  "Our Story": "Hamari kahani", "Built for Bharat's Vendors 🏪": "Bharat ke vendors ke liye bana 🏪", "VyapaarSathi was born from a simple observation: millions of small vendors across India manage their entire business in their head or in worn-out notebooks.": "VyapaarSathi ek simple baat dekhkar bana: India ke lakhon chhote vendors apna poora business dimaag mein ya purani notebooks mein sambhalte hain.", "We built a solution that works the way vendors do — just speak in your language, and we handle the rest. No apps to learn, no typing required.": "Humne vendors ke tareeke ka solution banaya — apni language mein bolo, baaki hum sambhalenge. App seekhne ya type karne ki zaroorat nahi.", "Today, VyapaarSathi helps vendors track sales, manage stock, monitor udhari, and get AI-powered business insights — all through WhatsApp.": "Aaj VyapaarSathi vendors ko sales, stock, udhari aur AI business insights WhatsApp par manage karne mein help karta hai.",
+  "Got Questions?": "Koi sawaal?", "Help Centre ❓": "Help centre ❓", "Start Today — It's Free! 🚀": "Aaj hi shuru karo — free! 🚀", "Join thousands of vendors already using VyapaarSathi to grow their business.": "Apna business badhane ke liye VyapaarSathi use kar rahe hazaaron vendors ke saath jud jao.", "🚀 Sign In — Free": "🚀 Sign in — free", "Made with ❤️ for India's vendors · © 2026 VyapaarSathi": "India ke vendors ke liye ❤️ se bana · © 2026 VyapaarSathi", "Privacy": "Privacy", "Terms": "Terms", "Contact": "Contact",
+  "Voice Bookkeeping": "Voice bookkeeping", "WhatsApp pe sirf bolo — we record everything. No typing, no app to learn.": "WhatsApp par bas bolo — hum sab record karenge. Typing nahi, app seekhne ki zaroorat nahi.", "Smart Analytics": "Smart analytics", "Daily, weekly and monthly reports auto-generated. See exactly how you're earning.": "Daily, weekly aur monthly reports apne-aap banti hain. Dekho exactly kitni kamai ho rahi hai.", "Udhari Tracker": "Udhari tracker", "Who owes you and how much — crystal clear. Overdue alerts included.": "Kis par kitna udhaar hai — ekdum clear. Late payment alerts bhi.", "Stock Alerts": "Stock alerts", "Get alerts when stock runs low. Never run out of your top-selling items.": "Stock kam ho to alert pao. Sabse zyada bikne wali cheezein kabhi khatam na hon.", "AI Market Insights": "AI market insights", "Every morning, AI tells you which items sell most and when demand peaks.": "Har subah AI batata hai kaunsi cheezein zyada bikti hain aur demand kab badhti hai.", "PDF Reports": "PDF reports", "CA-ready reports in one click. Prepared for income tax, GST and more.": "Ek click mein CA-ready reports. Income tax, GST aur aur bhi cheezon ke liye tayyar.",
+  "Register & Get Connected": "Register karo aur connect ho jao", "Sign up and get a dedicated WhatsApp number for your business in minutes.": "Sign up karo aur kuch minutes mein business ke liye alag WhatsApp number pao.", "Just Speak in Your Language": "Apni language mein bolo", "Send a voice note on WhatsApp — say what you sold, spent, or who owes you.": "WhatsApp par voice note bhejo — kya becha, kitna kharch kiya, ya kisne udhaar liya batao.", "See Your Full Dashboard": "Apna poora dashboard dekho", "Open VyapaarSathi anytime to see complete data, reports, stock, and AI insights.": "Poora data, reports, stock aur AI insights dekhne ke liye kabhi bhi VyapaarSathi kholo.",
+  "You speak in Hindi, Marathi, or Hinglish": "Hindi, Marathi ya Hinglish mein bolo", "AI transcribes and understands the intent": "AI likhkar intent samajhta hai", "Data stored in your dashboard in real-time": "Data turant dashboard mein save hota hai", "Reports and insights update automatically": "Reports aur insights apne-aap update hote hain",
+  "How does voice recognition work?": "Voice recognition kaise kaam karta hai?", "You send a voice note on WhatsApp in Hindi, Marathi, or Hinglish. Our AI transcribes and understands the transaction and records it instantly.": "WhatsApp par Hindi, Marathi ya Hinglish mein voice note bhejo. Hamara AI transaction samajhkar turant record karta hai.", "Is my business data safe?": "Kya mera business data safe hai?", "Yes, all data is encrypted and stored securely. Only you and your admin can access your business data.": "Haan, saara data encrypted aur securely save hota hai. Sirf tum aur tumhara admin ise dekh sakte ho.", "Can I use it without a smartphone?": "Kya smartphone ke bina use kar sakte hain?", "VyapaarSathi works on any phone with WhatsApp — even basic smartphones. Very low data usage.": "WhatsApp wale kisi bhi phone par VyapaarSathi chalta hai. Data bhi bahut kam lagta hai.", "What languages are supported?": "Kaunsi languages supported hain?", "Currently Hindi, Marathi, Hinglish, and English. More regional languages coming soon.": "Abhi Hindi, Marathi, Hinglish aur English hain. Aur regional languages jald aayengi.", "Is VyapaarSathi really free?": "Kya VyapaarSathi sach mein free hai?", "Yes! The basic plan is 100% free. Premium features like advanced analytics are in paid plans.": "Haan! Basic plan 100% free hai. Advanced analytics jaise premium features paid plans mein hain.", "How do I get started?": "Shuru kaise karun?", "Click Start Free below and sign in with your WhatsApp number. Done in under 2 minutes.": "Neeche Start Free par click karo aur WhatsApp number se sign in karo. Do minute se bhi kam mein ho jayega.",
+  "Aam 5kg, 650 rupees mein becha": "Aam 5kg, 650 rupaye mein becha", "✅ Recorded!\nAam 5kg → +₹650\nAaj ki kamai: ₹2,340": "✅ Record ho gaya!\nAam 5kg → +₹650\nAaj ki kamai: ₹2,340", "Raju bhai ne 340 udhar liya": "Raju bhai ne 340 udhaar liya", "📝 Udhari saved!\nRaju Bhai: ₹340\nTotal pending: ₹1,020": "📝 Udhaari save hui!\nRaju Bhai: ₹340\nTotal pending: ₹1,020", "Kela ka stock khatam ho raha hai": "Kele ka stock khatam ho raha hai", "⚠️ Stock alert set!\nKela: only 8 dozen left\nRestock reminder: 7am tomorrow": "⚠️ Stock alert set!\nKele: sirf 8 dozen bache\nStock bharne ki yaad: kal subah 7 baje",
+};
+
+const HINDI_CHAT: Record<string, string> = {
+  "Aam 5kg, 650 rupees mein becha": "आम ५ किलो, ६५० रुपये में बेचा",
+  "✅ Recorded!\nAam 5kg → +₹650\nAaj ki kamai: ₹2,340": "✅ दर्ज किया!\nआम ५ किलो → +₹६५०\nआज की कमाई: ₹२,३४०",
+  "Raju bhai ne 340 udhar liya": "राजू भाई ने ३४० रुपये उधार लिए",
+  "📝 Udhari saved!\nRaju Bhai: ₹340\nTotal pending: ₹1,020": "📝 उधारी दर्ज हुई!\nराजू भाई: ₹३४०\nकुल बाकी: ₹१,०२०",
+  "Kela ka stock khatam ho raha hai": "केले का स्टॉक खत्म हो रहा है",
+  "⚠️ Stock alert set!\nKela: only 8 dozen left\nRestock reminder: 7am tomorrow": "⚠️ स्टॉक अलर्ट सेट!\nकेले: केवल ८ दर्जन बाकी\nस्टॉक भरने की याद: कल सुबह ७ बजे",
+};
+
+const ENGLISH_CHAT: Record<string, string> = {
+  "Aam 5kg, 650 rupees mein becha": "Sold 5 kg of mangoes for ₹650",
+  "✅ Recorded!\nAam 5kg → +₹650\nAaj ki kamai: ₹2,340": "✅ Recorded!\nMangoes 5 kg → +₹650\nToday's earnings: ₹2,340",
+  "Raju bhai ne 340 udhar liya": "Raju borrowed ₹340",
+  "📝 Udhari saved!\nRaju Bhai: ₹340\nTotal pending: ₹1,020": "📝 Credit recorded!\nRaju: ₹340\nTotal outstanding: ₹1,020",
+  "Kela ka stock khatam ho raha hai": "Banana stock is running low",
+  "⚠️ Stock alert set!\nKela: only 8 dozen left\nRestock reminder: 7am tomorrow": "⚠️ Stock alert set!\nBananas: only 8 dozen left\nRestock reminder: 7am tomorrow",
+};
 
 // Waveform bar heights (same as prototype)
 const WH = [3,6,10,16,22,28,24,18,26,30,24,20,14,10,16,22,26,20,16,12,8,14,20,24,18,14,10,6,4,8];
@@ -108,7 +159,19 @@ export default function Landing() {
     return () => clearInterval(t);
   }, []);
 
-  const t = (en: string, hi: string) => lang === "hi" ? hi : en;
+  const t = (en: string, hi: string) => {
+    if (lang === "hi") return HINDI_CHAT[en] ?? hi;
+    if (lang === "mr") return MARATHI[en] ?? hi;
+    if (lang === "hinglish") return HINGLISH[en] ?? en;
+    return ENGLISH_CHAT[en] ?? en;
+  };
+
+  const languageOptions: { value: Lang; label: string }[] = [
+    { value: "en", label: "English" },
+    { value: "hi", label: "हिंदी" },
+    { value: "mr", label: "मराठी" },
+    { value: "hinglish", label: "Hinglish" },
+  ];
 
   return (
     <div className="min-h-screen bg-white font-['Manrope',sans-serif] text-slate-900 overflow-x-hidden">
@@ -146,13 +209,13 @@ export default function Landing() {
           </div>
 
           <div className="hidden md:flex items-center gap-3">
-            {/* Language toggle */}
-            <button
-              onClick={() => setLang(l => l === "en" ? "hi" : "en")}
-              className="flex items-center gap-1 px-3 py-1.5 rounded-full border border-slate-200 text-xs font-bold text-slate-600 hover:border-orange-300 transition"
-            >
-              🌐 {lang.toUpperCase()}
-            </button>
+            <label className="flex items-center gap-2 px-3 py-1.5 rounded-full border border-slate-200 text-xs font-bold text-slate-600 hover:border-orange-300 transition">
+              <span aria-hidden="true">🌐</span>
+              <span className="sr-only">{t("Language", "भाषा")}</span>
+              <select value={lang} onChange={event => setLang(event.target.value as Lang)} aria-label={t("Language", "भाषा")} className="bg-transparent outline-none cursor-pointer">
+                {languageOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
             <button
               onClick={() => navigate("/login")}
               className="px-5 py-2 rounded-full bg-orange-500 hover:bg-orange-600 text-white text-sm font-bold shadow-sm transition"
@@ -175,9 +238,16 @@ export default function Landing() {
           <div className="md:hidden bg-white border-t border-slate-100 px-4 py-4 flex flex-col gap-4">
             {["#features","#how","#demo","#about","#faq"].map((href, i) => (
               <a key={href} href={href} onClick={() => setMobileMenuOpen(false)} className="text-sm font-semibold text-slate-600 nav-link">
-                {[t("Features","विशेषताएं"),t("How it Works","कैसे काम करता है"),"Demo",t("About","हमारे बारे में"),t("Help","सहायता")][i]}
+                {[t("Features","विशेषताएं"),t("How it Works","कैसे काम करता है"),t("Demo","डेमो"),t("About","हमारे बारे में"),t("Help","सहायता")][i]}
               </a>
             ))}
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-600">
+              <span aria-hidden="true">🌐</span>
+              <span>{t("Language", "भाषा")}</span>
+              <select value={lang} onChange={event => setLang(event.target.value as Lang)} aria-label={t("Language", "भाषा")} className="ml-auto rounded-lg border border-slate-200 bg-white px-2 py-1">
+                {languageOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </label>
             <button onClick={() => navigate("/login")} className="w-full py-2 rounded-full bg-orange-500 text-white font-bold text-sm">
               {t("Sign In", "साइन इन")}
             </button>
@@ -236,7 +306,7 @@ export default function Landing() {
                   t("✅ No typing needed", "✅ कोई टाइपिंग नहीं"),
                   t("✅ Hindi, Marathi, Hinglish", "✅ हिंदी, मराठी, हिंगलिश"),
                   t("✅ Works on WhatsApp", "✅ WhatsApp पर काम करता है"),
-                  "✅ 100% Free",
+                  t("✅ 100% Free", "✅ १००% मुफ्त"),
                 ].map(badge => (
                   <span key={badge} className="text-xs font-semibold text-white/80 bg-white/10 px-3 py-1.5 rounded-full border border-white/10">
                     {badge}
@@ -257,7 +327,7 @@ export default function Landing() {
                   <div className="w-9 h-9 rounded-full bg-orange-500 flex items-center justify-center text-white font-bold text-sm">VS</div>
                   <div>
                     <p className="text-white font-bold text-sm">VyapaarSathi Bot</p>
-                    <p className="text-green-300 text-xs">● Online · WhatsApp</p>
+                    <p className="text-green-300 text-xs">{t("● Online · WhatsApp", "● ऑनलाइन · WhatsApp")}</p>
                   </div>
                 </div>
                 {/* Chat body */}
@@ -274,7 +344,7 @@ export default function Landing() {
                         </div>
                       ) : (
                         <div className="bg-white rounded-2xl rounded-tl-sm px-3 py-2 max-w-[80%] shadow-sm">
-                          <p className="text-xs text-slate-700 whitespace-pre-line">{m.text}</p>
+                          <p className="text-xs text-slate-700 whitespace-pre-line">{t(m.text, m.text)}</p>
                         </div>
                       )}
                     </div>
@@ -282,7 +352,7 @@ export default function Landing() {
                 </div>
                 {/* Input bar */}
                 <div className="flex items-center gap-2 px-3 py-2 bg-[#F0F0F0] border-t border-slate-200">
-                  <div className="flex-1 bg-white rounded-full px-3 py-1.5 text-xs text-slate-400">Tap to speak...</div>
+                  <div className="flex-1 bg-white rounded-full px-3 py-1.5 text-xs text-slate-400">{t("Tap to speak...", "बोलने के लिए टैप करें...")}</div>
                   <div className="w-8 h-8 bg-[#25D366] rounded-full flex items-center justify-center text-white text-xs">🎤</div>
                 </div>
               </div>
@@ -303,8 +373,8 @@ export default function Landing() {
               <div key={i} className="relative bg-white rounded-3xl p-8 shadow-sm border border-slate-100 feat-card">
                 <div className="w-12 h-12 rounded-2xl bg-orange-50 flex items-center justify-center text-2xl mb-5">{s.e}</div>
                 <span className="absolute top-6 right-6 text-5xl font-black text-slate-100 select-none">{i + 1}</span>
-                <h3 className="text-lg font-bold text-slate-900 mb-2">{lang === "hi" ? s.hi : s.en}</h3>
-                <p className="text-sm text-slate-500 leading-relaxed">{lang === "hi" ? s.desc_hi : s.desc_en}</p>
+                <h3 className="text-lg font-bold text-slate-900 mb-2">{t(s.en, s.hi)}</h3>
+                <p className="text-sm text-slate-500 leading-relaxed">{t(s.desc_en, s.desc_hi)}</p>
               </div>
             ))}
           </div>
@@ -322,8 +392,8 @@ export default function Landing() {
             {FEATURES.map((f, i) => (
               <div key={i} className="feat-card bg-white border border-slate-100 rounded-3xl p-7 shadow-sm">
                 <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-orange-50 to-orange-100 flex items-center justify-center text-2xl mb-4">{f.e}</div>
-                <h3 className="font-bold text-slate-900 mb-2">{lang === "hi" ? f.hi : f.en}</h3>
-                <p className="text-sm text-slate-500 leading-relaxed">{lang === "hi" ? f.desc_hi : f.desc_en}</p>
+                <h3 className="font-bold text-slate-900 mb-2">{t(f.en, f.hi)}</h3>
+                <p className="text-sm text-slate-500 leading-relaxed">{t(f.desc_en, f.desc_hi)}</p>
               </div>
             ))}
           </div>
@@ -351,7 +421,7 @@ export default function Landing() {
                 <div className="w-11 h-11 rounded-full bg-[#25D366] flex items-center justify-center text-xl flex-shrink-0">🤖</div>
                 <div className="flex-1">
                   <p className="text-white font-bold text-sm leading-tight">VyaparSathi Bot</p>
-                  <p className="text-[rgba(255,255,255,0.7)] text-xs">● Online · WhatsApp Business</p>
+                  <p className="text-[rgba(255,255,255,0.7)] text-xs">{t("● Online · WhatsApp Business", "● ऑनलाइन · WhatsApp Business")}</p>
                 </div>
                 <span className="text-white/70 text-lg">📞</span>
               </div>
@@ -380,11 +450,11 @@ export default function Landing() {
                           color: "#111",
                         }}
                       >
-                        {m.text}
+                        {t(m.text, m.text)}
                       </div>
                     )}
                     {m.isVoice && m.caption && (
-                      <span className="text-[10px] text-slate-400 mt-0.5 px-1">{m.caption}</span>
+                      <span className="text-[10px] text-slate-400 mt-0.5 px-1">{t(m.caption, m.caption)}</span>
                     )}
                   </div>
                 ))}
@@ -392,7 +462,7 @@ export default function Landing() {
 
               {/* Input bar */}
               <div className="flex items-center gap-2 px-3 py-2.5 bg-[#F0F2F5] border-t border-slate-200">
-                <div className="flex-1 bg-white rounded-full px-4 py-2 text-xs text-slate-400 shadow-sm">Tap to speak...</div>
+                <div className="flex-1 bg-white rounded-full px-4 py-2 text-xs text-slate-400 shadow-sm">{t("Tap to speak...", "बोलने के लिए टैप करें...")}</div>
                 <div className="w-9 h-9 bg-[#25D366] rounded-full flex items-center justify-center text-white text-sm shadow-sm">🎤</div>
               </div>
             </div>
@@ -417,7 +487,7 @@ export default function Landing() {
                   className="inline-flex items-center gap-2 px-6 py-3 rounded-xl text-white font-bold text-sm shadow-lg shadow-green-500/30 transition hover:opacity-90"
                   style={{ background: "linear-gradient(135deg, #25D366, #1da851)" }}
                 >
-                  💬 Open on WhatsApp
+                  {t("💬 Open on WhatsApp", "💬 WhatsApp पर खोलें")}
                 </a>
               </div>
 
@@ -437,7 +507,7 @@ export default function Landing() {
                       style={{ borderBottom: i < arr.length - 1 ? "1px solid #F1F5F9" : "none" }}
                     >
                       <span className="text-xl w-7 text-center flex-shrink-0">{step.e}</span>
-                      <span className="text-sm text-slate-600 leading-snug">{lang === "hi" ? step.hi : step.en}</span>
+                      <span className="text-sm text-slate-600 leading-snug">{t(step.en, step.hi)}</span>
                     </div>
                   ))}
                 </div>
@@ -476,12 +546,12 @@ export default function Landing() {
                   onClick={() => setFaqOpen(faqOpen === i ? null : i)}
                   className="w-full flex justify-between items-center px-6 py-5 text-left font-semibold text-slate-900 hover:text-orange-600 transition"
                 >
-                  <span>{lang === "hi" ? faq.q_hi : faq.q_en}</span>
+                  <span>{t(faq.q_en, faq.q_hi)}</span>
                   <span className="text-xl text-orange-500">{faqOpen === i ? "−" : "+"}</span>
                 </button>
                 {faqOpen === i && (
                   <div className="px-6 pb-5 text-sm text-slate-600 leading-relaxed animate-fadeUp">
-                    {lang === "hi" ? faq.a_hi : faq.a_en}
+                    {t(faq.a_en, faq.a_hi)}
                   </div>
                 )}
               </div>
