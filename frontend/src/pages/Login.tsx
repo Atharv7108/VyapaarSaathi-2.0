@@ -30,18 +30,18 @@ export default function Login() {
   async function handleRequestOtp(e?: React.FormEvent) {
     if (e) e.preventDefault();
     setError("");
-    const digits = normalizePhone(phone);
-    if (digits.length < 10) {
-      setError("Please enter a valid phone number (at least 10 digits).");
+    const rawDigits = normalizePhone(phone);
+    const tenDigits = rawDigits.length === 12 && rawDigits.startsWith("91") ? rawDigits.slice(2) : rawDigits;
+    if (!/^[6-9]\d{9}$/.test(tenDigits)) {
+      setError("Please enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.");
       return;
     }
     setLoading(true);
     try {
-      const vendorPhone = digits.length === 10 ? `91${digits}` : digits;
       const res = await fetch(`${API_BASE}/auth/request-otp`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: `whatsapp:+${vendorPhone}` }),
+        body: JSON.stringify({ phone: `whatsapp:+91${tenDigits}` }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Failed to send OTP");
@@ -63,9 +63,9 @@ export default function Login() {
     }
     setLoading(true);
     try {
-      const digits = normalizePhone(phone);
-      const vendorPhone = digits.length === 10 ? `91${digits}` : digits;
-      const fullPhone = `whatsapp:+${vendorPhone}`;
+      const rawDigits = normalizePhone(phone);
+      const tenDigits = rawDigits.length === 12 && rawDigits.startsWith("91") ? rawDigits.slice(2) : rawDigits;
+      const fullPhone = `whatsapp:+91${tenDigits}`;
       
       const res = await fetch(`${API_BASE}/auth/verify-otp`, {
         method: "POST",

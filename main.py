@@ -654,46 +654,66 @@ class OnboardRequest(BaseModel):
     language: str
     pin: str
 
+import re
+import secrets
+
+
+def _validate_and_normalize_phone(raw_phone: str) -> str:
+    cleaned = (raw_phone or "").strip()
+    digits = "".join(filter(str.isdigit, cleaned))
+    
+    if len(digits) == 10:
+        if not re.match(r"^[6-9]\d{9}$", digits):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid mobile number. Please enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.",
+            )
+        digits = f"91{digits}"
+    elif len(digits) == 12:
+        if not re.match(r"^91[6-9]\d{9}$", digits):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid mobile number. Country code must be +91 followed by a valid 10-digit mobile number.",
+            )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Please enter a valid 10-digit mobile number.",
+        )
+        
+    return f"whatsapp:+{digits}"
+
+
 @app.post("/auth/request-otp")
 def request_otp(data: OTPRequest):
-    raw_phone = data.phone.strip()
-    if not raw_phone:
-        raise HTTPException(status_code=400, detail="Phone number is required")
-
-    digits = "".join(filter(str.isdigit, raw_phone))
-    if len(digits) == 10:
-        digits = f"91{digits}"
-    if len(digits) < 10:
-        raise HTTPException(status_code=400, detail="Please enter a valid 10-digit phone number")
-
-    phone_key = f"whatsapp:+{digits}"
-
-    # Generate secure 4-digit OTP
-    otp = str(random.randint(1000, 9999))
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
-
-    # Store in-memory cache
-    otp_store[phone_key] = {"otp": otp, "expires_at": expires_at}
-    otp_store[digits] = {"otp": otp, "expires_at": expires_at}
-
-    # Persist in MongoDB
+    phone_key = _validate_and_normalize_phone(data.phone)
+    now = datetime.now(timezone.utc)
+    
+    # Cooldown check: prevent rapid repeated spamming (30 seconds)
     try:
         db = get_db()
-        db["otps"].update_one(
-            {"phone": phone_key},
-            {
-                "$set": {
-                    "otp": otp,
-                    "expires_at": expires_at.isoformat(),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            },
-            upsert=True,
-        )
+        existing = db["otps"].find_one({"phone": phone_key})
+        if existing and "created_at" in existing:
+            created_dt = existing["created_at"]
+            if isinstance(created_dt, str):
+                created_dt = datetime.fromisoformat(created_dt)
+            if created_dt.tzinfo is None:
+                created_dt = created_dt.replace(tzinfo=timezone.utc)
+            elapsed = (now - created_dt).total_seconds()
+            if elapsed < 30:
+                wait_seconds = int(30 - elapsed)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Please wait {wait_seconds} seconds before requesting a new OTP.",
+                )
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.warning("Could not persist OTP in MongoDB: %s", exc)
+        logger.warning("Cooldown check error: %s", exc)
 
-    logger.info("Generated OTP for %s: %s", phone_key, otp)
+    # Cryptographically secure 4-digit OTP
+    otp = f"{secrets.randbelow(9000) + 1000}"
+    expires_at = now + timedelta(minutes=5)
 
     # WhatsApp message payload
     otp_message = (
@@ -703,79 +723,131 @@ def request_otp(data: OTPRequest):
         f"Suraksha ke liye ise kisi ke sath share na karein."
     )
 
-    whatsapp_sent = False
+    # MANDATORY WhatsApp Delivery:
+    # If Meta rejects the message (invalid number, not on WhatsApp), REJECT THE REQUEST!
     try:
         msg_id = send_whatsapp_reply(to_phone=phone_key, body=otp_message)
-        if msg_id:
-            whatsapp_sent = True
-            logger.info("Sent WhatsApp OTP to %s (msg_id=%s)", phone_key, msg_id)
+        if not msg_id:
+            raise RuntimeError("WhatsApp API returned no message ID")
+        logger.info("Sent WhatsApp OTP to %s (msg_id=%s)", phone_key, msg_id)
     except Exception as exc:
         logger.error("Failed to send WhatsApp OTP to %s: %s", phone_key, exc)
+        err_msg = str(exc)
+        if "131047" in err_msg or "24 hours" in err_msg.lower():
+            detail_msg = "Please send a message like 'Hi' to our WhatsApp bot first from this phone number to enable messaging."
+        elif "recipient" in err_msg.lower() or "not a valid whatsapp user" in err_msg.lower() or "131026" in err_msg:
+            detail_msg = "This phone number is not registered on WhatsApp. Please check the number."
+        else:
+            detail_msg = "Could not deliver WhatsApp OTP. Please ensure this number is active on WhatsApp and has messaged our bot."
+        raise HTTPException(status_code=400, detail=detail_msg)
+
+    # Only persist in MongoDB if message was successfully sent to WhatsApp
+    try:
+        db = get_db()
+        db["otps"].update_one(
+            {"phone": phone_key},
+            {
+                "$set": {
+                    "otp": otp,
+                    "expires_at": expires_at.isoformat(),
+                    "created_at": now.isoformat(),
+                    "attempts": 0,
+                }
+            },
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning("Could not persist OTP in MongoDB: %s", exc)
+        otp_store[phone_key] = {"otp": otp, "expires_at": expires_at, "attempts": 0}
 
     return {
         "status": "success",
-        "message": "OTP sent to your WhatsApp number",
+        "message": "OTP sent successfully to your WhatsApp number",
         "phone": phone_key,
-        "whatsapp_sent": whatsapp_sent,
     }
 
 
 @app.post("/auth/verify-otp")
 def verify_otp(data: OTPVerify):
-    raw_phone = data.phone.strip()
+    phone_key = _validate_and_normalize_phone(data.phone)
     otp_input = data.otp.strip()
 
-    if not raw_phone or not otp_input:
-        raise HTTPException(status_code=400, detail="Phone and OTP are required")
+    if not otp_input or len(otp_input) != 4 or not otp_input.isdigit():
+        raise HTTPException(status_code=400, detail="Please enter a valid 4-digit OTP code")
 
-    digits = "".join(filter(str.isdigit, raw_phone))
-    if len(digits) == 10:
-        digits = f"91{digits}"
-    phone_key = f"whatsapp:+{digits}"
+    now = datetime.now(timezone.utc)
+    rec = None
+    try:
+        db = get_db()
+        rec = db["otps"].find_one({"phone": phone_key})
+    except Exception as exc:
+        logger.warning("MongoDB lookup error in verify_otp: %s", exc)
+        rec = otp_store.get(phone_key)
 
-    valid = False
-    if otp_input == "1234":
-        valid = True
-    else:
-        # Check in MongoDB
+    if not rec:
+        raise HTTPException(
+            status_code=400,
+            detail="No active OTP found. Please request an OTP first.",
+        )
+
+    # Check attempts (brute-force lockout: max 3 attempts)
+    attempts = rec.get("attempts", 0)
+    if attempts >= 3:
         try:
-            db = get_db()
-            rec = db["otps"].find_one({"phone": phone_key})
-            if rec:
-                exp_raw = rec.get("expires_at")
-                if exp_raw:
-                    exp_dt = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
-                    if exp_dt.tzinfo is None:
-                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
-                    if datetime.now(timezone.utc) > exp_dt:
-                        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
-                if rec.get("otp") == otp_input:
-                    valid = True
-                    db["otps"].delete_one({"phone": phone_key})
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.warning("Error checking OTP in MongoDB: %s", exc)
+            get_db()["otps"].delete_one({"phone": phone_key})
+        except Exception:
+            otp_store.pop(phone_key, None)
+        raise HTTPException(
+            status_code=400,
+            detail="Too many incorrect attempts. For security, this OTP has been cancelled. Please request a new one.",
+        )
 
-        # Fallback in-memory check
-        if not valid:
-            mem = otp_store.get(phone_key) or otp_store.get(digits)
-            if mem:
-                val = mem if isinstance(mem, str) else mem.get("otp")
-                exp = mem.get("expires_at") if isinstance(mem, dict) else None
-                if exp and datetime.now(timezone.utc) > exp:
-                    raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
-                if val == otp_input:
-                    valid = True
-                    otp_store.pop(phone_key, None)
-                    otp_store.pop(digits, None)
+    # Check expiry (5 minutes)
+    exp_raw = rec.get("expires_at")
+    if exp_raw:
+        exp_dt = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+        if exp_dt.tzinfo is None:
+            exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+        if now > exp_dt:
+            try:
+                get_db()["otps"].delete_one({"phone": phone_key})
+            except Exception:
+                otp_store.pop(phone_key, None)
+            raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
 
-    if not valid:
-        raise HTTPException(status_code=400, detail="Invalid OTP. Please check your WhatsApp and try again.")
+    # Strictly check OTP match (NO BACKDOOR, NO 1234)
+    if rec.get("otp") != otp_input:
+        try:
+            get_db()["otps"].update_one({"phone": phone_key}, {"$inc": {"attempts": 1}})
+        except Exception:
+            if phone_key in otp_store and isinstance(otp_store[phone_key], dict):
+                otp_store[phone_key]["attempts"] = attempts + 1
+        remaining = 2 - attempts
+        if remaining > 0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Incorrect OTP. You have {remaining} attempt{'s' if remaining != 1 else ''} remaining.",
+            )
+        else:
+            try:
+                get_db()["otps"].delete_one({"phone": phone_key})
+            except Exception:
+                otp_store.pop(phone_key, None)
+            raise HTTPException(
+                status_code=400,
+                detail="Too many incorrect attempts. This OTP has been cancelled. Please request a new one.",
+            )
 
+    # Successful match: Burn on read (delete immediately)
+    try:
+        get_db()["otps"].delete_one({"phone": phone_key})
+    except Exception:
+        otp_store.pop(phone_key, None)
+
+    # Retrieve or create vendor record
     vendor = get_or_create_vendor(phone_key)
 
-    # Send login confirmation message to WhatsApp
+    # Send confirmation message to WhatsApp
     try:
         send_whatsapp_reply(
             to_phone=phone_key,
