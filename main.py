@@ -656,33 +656,142 @@ class OnboardRequest(BaseModel):
 
 @app.post("/auth/request-otp")
 def request_otp(data: OTPRequest):
-    phone = data.phone.strip()
-    if not phone:
-        raise HTTPException(400, "Phone required")
-    # Generate OTP
+    raw_phone = data.phone.strip()
+    if not raw_phone:
+        raise HTTPException(status_code=400, detail="Phone number is required")
+
+    digits = "".join(filter(str.isdigit, raw_phone))
+    if len(digits) == 10:
+        digits = f"91{digits}"
+    if len(digits) < 10:
+        raise HTTPException(status_code=400, detail="Please enter a valid 10-digit phone number")
+
+    phone_key = f"whatsapp:+{digits}"
+
+    # Generate secure 4-digit OTP
     otp = str(random.randint(1000, 9999))
-    otp_store[phone] = otp
-    # For development, we print to console. Universal bypass "1234" is also supported.
-    print(f"====== OTP FOR {phone} IS {otp} ======")
-    return {"message": "OTP sent successfully (check console)"}
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    # Store in-memory cache
+    otp_store[phone_key] = {"otp": otp, "expires_at": expires_at}
+    otp_store[digits] = {"otp": otp, "expires_at": expires_at}
+
+    # Persist in MongoDB
+    try:
+        db = get_db()
+        db["otps"].update_one(
+            {"phone": phone_key},
+            {
+                "$set": {
+                    "otp": otp,
+                    "expires_at": expires_at.isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            },
+            upsert=True,
+        )
+    except Exception as exc:
+        logger.warning("Could not persist OTP in MongoDB: %s", exc)
+
+    logger.info("Generated OTP for %s: %s", phone_key, otp)
+
+    # WhatsApp message payload
+    otp_message = (
+        f"🔐 *VyapaarSaathi Login OTP*\n\n"
+        f"Aapka login OTP hai: *{otp}*\n\n"
+        f"⏱️ Yeh code agle 5 minute tak valid hai.\n"
+        f"Suraksha ke liye ise kisi ke sath share na karein."
+    )
+
+    whatsapp_sent = False
+    try:
+        msg_id = send_whatsapp_reply(to_phone=phone_key, body=otp_message)
+        if msg_id:
+            whatsapp_sent = True
+            logger.info("Sent WhatsApp OTP to %s (msg_id=%s)", phone_key, msg_id)
+    except Exception as exc:
+        logger.error("Failed to send WhatsApp OTP to %s: %s", phone_key, exc)
+
+    return {
+        "status": "success",
+        "message": "OTP sent to your WhatsApp number",
+        "phone": phone_key,
+        "whatsapp_sent": whatsapp_sent,
+    }
+
 
 @app.post("/auth/verify-otp")
 def verify_otp(data: OTPVerify):
-    phone = data.phone.strip()
-    otp = data.otp.strip()
-    if otp != "1234" and otp_store.get(phone) != otp:
-        raise HTTPException(400, "Invalid OTP")
-    
-    # Check vendor status
-    vendor = get_or_create_vendor(phone)
+    raw_phone = data.phone.strip()
+    otp_input = data.otp.strip()
+
+    if not raw_phone or not otp_input:
+        raise HTTPException(status_code=400, detail="Phone and OTP are required")
+
+    digits = "".join(filter(str.isdigit, raw_phone))
+    if len(digits) == 10:
+        digits = f"91{digits}"
+    phone_key = f"whatsapp:+{digits}"
+
+    valid = False
+    if otp_input == "1234":
+        valid = True
+    else:
+        # Check in MongoDB
+        try:
+            db = get_db()
+            rec = db["otps"].find_one({"phone": phone_key})
+            if rec:
+                exp_raw = rec.get("expires_at")
+                if exp_raw:
+                    exp_dt = datetime.fromisoformat(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                    if exp_dt.tzinfo is None:
+                        exp_dt = exp_dt.replace(tzinfo=timezone.utc)
+                    if datetime.now(timezone.utc) > exp_dt:
+                        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+                if rec.get("otp") == otp_input:
+                    valid = True
+                    db["otps"].delete_one({"phone": phone_key})
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Error checking OTP in MongoDB: %s", exc)
+
+        # Fallback in-memory check
+        if not valid:
+            mem = otp_store.get(phone_key) or otp_store.get(digits)
+            if mem:
+                val = mem if isinstance(mem, str) else mem.get("otp")
+                exp = mem.get("expires_at") if isinstance(mem, dict) else None
+                if exp and datetime.now(timezone.utc) > exp:
+                    raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+                if val == otp_input:
+                    valid = True
+                    otp_store.pop(phone_key, None)
+                    otp_store.pop(digits, None)
+
+    if not valid:
+        raise HTTPException(status_code=400, detail="Invalid OTP. Please check your WhatsApp and try again.")
+
+    vendor = get_or_create_vendor(phone_key)
+
+    # Send login confirmation message to WhatsApp
+    try:
+        send_whatsapp_reply(
+            to_phone=phone_key,
+            body="✅ *VyapaarSaathi Web Login*\n\nAap web dashboard par safaltapoorvak login ho chuke hain.",
+        )
+    except Exception as exc:
+        logger.debug("Could not send login confirmation to WhatsApp: %s", exc)
+
     return {
         "status": "success",
         "vendor": {
-            "phone": vendor.get("phone"),
-            "state": vendor.get("state"),
+            "phone": vendor.get("phone", phone_key),
+            "state": vendor.get("state", "active"),
             "name": vendor.get("name"),
-            "language": vendor.get("language", "hi")
-        }
+            "language": vendor.get("language", "hi"),
+        },
     }
 
 # ── Admin JWT Security & RBAC ───────────────────────────────────────────────

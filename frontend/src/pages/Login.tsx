@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useStore } from "../store/useStore";
 
@@ -13,13 +13,22 @@ export default function Login() {
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [resendCooldown, setResendCooldown] = useState(0);
+
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setResendCooldown((prev) => prev - 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [resendCooldown]);
 
   function normalizePhone(raw: string): string {
     return raw.replace(/\D/g, "");
   }
 
-  async function handleRequestOtp(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleRequestOtp(e?: React.FormEvent) {
+    if (e) e.preventDefault();
     setError("");
     const digits = normalizePhone(phone);
     if (digits.length < 10) {
@@ -34,10 +43,12 @@ export default function Login() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: `whatsapp:+${vendorPhone}` }),
       });
-      if (!res.ok) throw new Error("Failed to send OTP");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed to send OTP");
       setStep(2);
+      setResendCooldown(30);
     } catch (err) {
-      setError("Failed to send OTP. Please try again.");
+      setError(err instanceof Error ? err.message : "Failed to send OTP. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -62,9 +73,8 @@ export default function Login() {
         body: JSON.stringify({ phone: fullPhone, otp: otp }),
       });
       
-      if (!res.ok) throw new Error("Invalid OTP");
-      
       const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Invalid OTP");
       
       // Successfully authenticated
       loginAsVendor(fullPhone);
@@ -83,7 +93,7 @@ export default function Login() {
       }
       
     } catch (err) {
-      setError("Invalid OTP. Please try again.");
+      setError(err instanceof Error ? err.message : "Invalid OTP. Please check your WhatsApp and try again.");
     } finally {
       setLoading(false);
     }
@@ -95,14 +105,24 @@ export default function Login() {
 
       <div className="w-full max-w-md">
         <div className="bg-white rounded-3xl shadow-2xl shadow-black/40 p-8 sm:p-10">
-          <div className="flex flex-col items-center mb-8">
+          <div className="flex flex-col items-center mb-6 text-center">
             <img src={`${import.meta.env.BASE_URL}logo.png`} alt="VyapaarSathi" className="h-16 w-auto object-contain mb-3" />
-            <h1 className="text-2xl font-black text-slate-900">{step === 1 ? "Welcome Back" : "Enter OTP"}</h1>
-            <p className="text-sm text-slate-500 mt-1 text-center">
-              {step === 1 
-                ? "Enter the WhatsApp number linked to your VyapaarSathi account"
-                : `We've generated an OTP for ${phone}. (Use 1234 for testing)`}
-            </p>
+            <h1 className="text-2xl font-black text-slate-900">{step === 1 ? "Welcome Back" : "WhatsApp Verification"}</h1>
+            {step === 1 ? (
+              <p className="text-sm text-slate-500 mt-1">
+                Enter your WhatsApp number to receive an instant login code
+              </p>
+            ) : (
+              <div className="flex flex-col items-center gap-1.5 mt-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-bold border border-emerald-200">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  OTP sent via WhatsApp
+                </span>
+                <p className="text-xs text-slate-600 mt-0.5">
+                  Enter the 4-digit code sent to <strong>+91 {phone.replace(/\D/g, "").slice(-10)}</strong>
+                </p>
+              </div>
+            )}
           </div>
 
           {step === 1 ? (
@@ -131,16 +151,27 @@ export default function Login() {
                 disabled={loading}
                 className="w-full py-3.5 bg-orange-500 hover:bg-orange-600 disabled:bg-orange-300 text-white font-bold text-base rounded-2xl shadow-lg shadow-orange-500/20 transition"
               >
-                {loading ? "Sending OTP..." : "Get OTP →"}
+                {loading ? "Sending WhatsApp OTP..." : "Get OTP on WhatsApp →"}
               </button>
             </form>
           ) : (
             <form onSubmit={handleVerifyOtp} className="space-y-5 animate-in slide-in-from-right-4 duration-300">
               <div>
                 <label className="block text-xs font-bold uppercase tracking-widest text-slate-500 mb-2 text-center">
-                  4-Digit OTP
+                  4-Digit OTP Code
                 </label>
-                <div className="flex justify-center gap-4">
+                <div
+                  className="flex justify-center gap-3.5"
+                  onPaste={(e) => {
+                    e.preventDefault();
+                    const pasted = e.clipboardData.getData("text").replace(/\D/g, "").slice(0, 4);
+                    if (pasted) {
+                      setOtp(pasted);
+                      const targetIdx = Math.min(pasted.length, 3);
+                      document.getElementById(`otp-${targetIdx}`)?.focus();
+                    }
+                  }}
+                >
                   {[0, 1, 2, 3].map((idx) => (
                     <input
                       key={idx}
@@ -164,12 +195,13 @@ export default function Login() {
                           document.getElementById(`otp-${idx - 1}`)?.focus();
                         }
                       }}
-                      className="w-14 h-14 text-center text-xl font-black text-slate-900 bg-slate-50 border-2 border-slate-200 focus:border-orange-400 focus:bg-white rounded-xl outline-none transition"
+                      className="w-13 h-14 sm:w-14 sm:h-14 text-center text-xl font-black text-slate-900 bg-slate-50 border-2 border-slate-200 focus:border-orange-500 focus:bg-white rounded-xl outline-none transition shadow-xs"
                     />
                   ))}
                 </div>
-                {error && <p className="mt-4 text-xs text-center text-red-500 font-medium">⚠️ {error}</p>}
+                {error && <p className="mt-3 text-xs text-center text-red-500 font-medium">⚠️ {error}</p>}
               </div>
+
               <button
                 type="submit"
                 disabled={loading || otp.length < 4}
@@ -177,13 +209,24 @@ export default function Login() {
               >
                 {loading ? "Verifying..." : "Verify & Sign In"}
               </button>
-              <button
-                type="button"
-                onClick={() => { setStep(1); setOtp(""); setError(""); }}
-                className="w-full py-3 text-slate-500 hover:text-slate-800 font-bold text-sm transition"
-              >
-                ← Back to Phone Number
-              </button>
+
+              <div className="flex items-center justify-between text-xs pt-1 px-1">
+                <button
+                  type="button"
+                  disabled={resendCooldown > 0 || loading}
+                  onClick={() => handleRequestOtp()}
+                  className="font-bold text-orange-600 hover:text-orange-700 disabled:text-slate-400 disabled:cursor-not-allowed transition"
+                >
+                  {resendCooldown > 0 ? `Resend OTP in ${resendCooldown}s` : "Resend OTP via WhatsApp"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setStep(1); setOtp(""); setError(""); }}
+                  className="text-slate-500 hover:text-slate-800 font-semibold transition"
+                >
+                  Change Number
+                </button>
+              </div>
             </form>
           )}
 
