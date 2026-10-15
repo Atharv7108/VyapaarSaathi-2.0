@@ -32,6 +32,42 @@ def _normalize_item_name(item_name: Any) -> str:
     return " ".join(str(item_name or "").strip().lower().split())
 
 
+def _resolve_delete_item_name(
+    db: Any,
+    phone_variants: List[str],
+    item_name: str,
+) -> str:
+    """Resolve a noisy voice target to the closest known vendor item."""
+    cleaned = _normalize_item_name(item_name)
+    if not cleaned:
+        return cleaned
+
+    known_names = {
+        _normalize_item_name(row.get("item_name"))
+        for row in db[TABLE].find(
+            {"phone": {"$in": phone_variants}, "is_active": True},
+            {"item_name": 1},
+        )
+    }
+    known_names.discard("")
+    known_names.update(
+        _normalize_item_name(row.get("category"))
+        for row in db[LEDGER].find(
+            {"phone": {"$in": phone_variants}, "type": "income"},
+            {"category": 1},
+        )
+    )
+    known_names.discard("")
+
+    exact = [name for name in known_names if name == cleaned]
+    if exact:
+        return exact[0]
+
+    # Whisper/LLM may append command words to an otherwise correct item name.
+    embedded = [name for name in known_names if f" {name} " in f" {cleaned} "]
+    return max(embedded, key=len) if embedded else cleaned
+
+
 # ─── Today's date helper ──────────────────────────────────────────────────────
 
 def _today() -> str:
@@ -312,6 +348,7 @@ def delete_inventory_item(phone: str, item_name: str) -> bool:
     if not cleaned:
         return False
 
+    cleaned = _resolve_delete_item_name(db, phone_variants, cleaned)
     escaped = re.escape(cleaned)
     result = db[TABLE].update_many(
         {

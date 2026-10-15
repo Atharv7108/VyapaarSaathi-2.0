@@ -359,3 +359,37 @@ def test_delete_inventory_item_not_found(monkeypatch):
     assert "nahi mila" in reply
     assert "Current profit" not in reply
 
+
+def test_noisy_delete_target_is_resolved_before_inventory_write(monkeypatch):
+    class FakeCollection:
+        def find(self, query, projection=None):
+            if query.get("type") == "income":
+                return [{"category": "samosa"}]
+            return [{"item_name": "samosa"}]
+
+    class FakeDb:
+        def __getitem__(self, name):
+            return FakeCollection()
+
+    monkeypatch.setattr("services.inventory.get_db", lambda: FakeDb())
+    monkeypatch.setattr("services.inventory.get_phone_variants", lambda _phone: ["vendor"])
+    update_calls = []
+    monkeypatch.setattr(
+        "services.inventory.TABLE",
+        "inventory",
+    )
+
+    class UpdateCollection(FakeCollection):
+        def update_many(self, query, update):
+            update_calls.append(query)
+            return type("Result", (), {"modified_count": 1, "matched_count": 1})()
+
+    class UpdateDb(FakeDb):
+        def __getitem__(self, name):
+            return UpdateCollection()
+
+    monkeypatch.setattr("services.inventory.get_db", lambda: UpdateDb())
+    from services.inventory import delete_inventory_item
+
+    assert delete_inventory_item("vendor", "samosa inventory message")
+    assert update_calls[0]["$or"][0]["item_name"]["$regex"] == "^samosa$"
