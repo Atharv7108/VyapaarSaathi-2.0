@@ -1,673 +1,1120 @@
-#  VyapaarSaathi — Voice-First AI Bookkeeping for Street Vendors
+# VyapaarSaathi
 
-> **"Bolo, aur hisaab ho jaye."**  
-> Speak your sales — bookkeeping happens automatically.
+> **Bolo, aur hisaab ho jaye.**
+> Speak naturally. Your business records itself.
 
-VyapaarSaathi is an AI-powered voice ledger built for India's 63 million street vendors and micro-entrepreneurs who cannot type, don't have time to maintain spreadsheets, and conduct business entirely in Hindi, Marathi, or Hinglish. Just send a WhatsApp voice note or tap a mic button — the system understands, records, and analyzes everything.
+VyapaarSaathi is a voice-first bookkeeping and business assistant for Indian
+street vendors and small businesses. A vendor can send a WhatsApp voice note
+or text message in Hindi, Marathi, Hinglish, or English. The system understands
+the message, converts it into structured business data, updates the ledger and
+inventory, handles udhari, and replies with a clear confirmation.
 
-### Business Autopilot
+The project also includes a web dashboard for reviewing the business and an
+explainable Business Autopilot that sends a vendor-specific morning plan on
+WhatsApp.
 
-The vendor dashboard includes a deterministic, vendor-scoped daily action plan. The
-Autopilot combines the last 14 days of ledger activity, today's inventory, and
-outstanding udhari to suggest up to five prioritized next actions. Each action
-includes its supporting reason and links to the relevant dashboard workflow.
-Autopilot is read-only: it never sends a customer reminder or places a supplier
-order without an explicit user action.
+This document is written both as a developer guide and as a presentation
+guide. The sections titled **How to explain it** can be used directly during
+a project demonstration.
 
-The API is available at:
+---
+
+## Table of Contents
+
+1. [The problem](#the-problem)
+2. [The solution in one minute](#the-solution-in-one-minute)
+3. [Current architecture](#current-architecture)
+4. [How audio is processed](#how-audio-is-processed)
+5. [How text is processed](#how-text-is-processed)
+6. [The complete WhatsApp flow](#the-complete-whatsapp-flow)
+7. [Intent and data extraction](#intent-and-data-extraction)
+8. [Conversation engine and follow-up questions](#conversation-engine-and-follow-up-questions)
+9. [Ledger and inventory behavior](#ledger-and-inventory-behavior)
+10. [Udhari flow](#udhari-flow)
+11. [Business Autopilot morning alert](#business-autopilot-morning-alert)
+12. [Web dashboard](#web-dashboard)
+13. [AI insights and reports](#ai-insights-and-reports)
+14. [Security and vendor isolation](#security-and-vendor-isolation)
+15. [Deployment architecture](#deployment-architecture)
+16. [API reference](#api-reference)
+17. [Technology stack](#technology-stack)
+18. [Local development](#local-development)
+19. [Environment variables](#environment-variables)
+20. [Project structure](#project-structure)
+21. [Presentation walkthrough](#presentation-walkthrough)
+22. [Known limitations and next steps](#known-limitations-and-next-steps)
+
+---
+
+## The problem
+
+Many small vendors:
+
+- Do not have time to maintain a spreadsheet.
+- Prefer speaking over typing.
+- Mix Hindi, Marathi, Hinglish, and English in one sentence.
+- Need to remember sales, expenses, stock, and customer credit at the same time.
+- Often do not know their actual profit or which item needs attention.
+
+Traditional bookkeeping software asks the vendor to understand forms,
+categories, and accounting terminology. VyapaarSaathi reverses that model:
+the vendor speaks naturally and the application performs the bookkeeping work.
+
+---
+
+## The solution in one minute
+
+Example message:
+
+> "Aaj 30 samosa bike, 600 rupaye aaye, aur doodh par 200 kharch hua."
+
+VyapaarSaathi:
+
+1. Receives the voice note through WhatsApp.
+2. Downloads and converts the audio.
+3. Transcribes speech into text using Groq Whisper.
+4. Sends the transcript to an LLM for structured extraction.
+5. Detects two business actions: a sale and an expense.
+6. Validates the result and checks the vendor's inventory.
+7. Saves the entries to the vendor's ledger.
+8. Deducts sold quantity from inventory when applicable.
+9. Replies with what was recorded and the current result.
+
+The same processing path is used for a typed WhatsApp message. Voice and text
+are two input formats; the bookkeeping logic after transcription is shared.
+
+---
+
+## Current architecture
 
 ```text
-GET /autopilot?vendor_id=<phone-or-web-vendor-id>
+                         +----------------------+
+                         | Vendor                |
+                         | WhatsApp voice/text   |
+                         +-----------+----------+
+                                     |
+                                     v
+                         +----------------------+
+                         | Meta WhatsApp Cloud   |
+                         | API webhook           |
+                         +-----------+----------+
+                                     |
+                                     v
++------------------------------------------------------------------+
+| FastAPI backend                                                  |
+|                                                                  |
+| main.py                                                          |
+| - webhook routing                                                |
+| - dashboard REST endpoints                                       |
+| - admin endpoints                                                 |
+| - application startup and scheduler lifecycle                    |
+|                                                                  |
+| services/voice_ledger.py                                         |
+| - audio download and conversion                                 |
+| - Groq Whisper transcription                                     |
+| - LLM extraction and validation                                  |
+| - shared transcript processing                                   |
+| - ledger and WhatsApp replies                                   |
+|                                                                  |
+| services/conversation_engine.py                                 |
+| - missing-information detection                                  |
+| - follow-up questions                                            |
+| - multi-turn pending state                                       |
+|                                                                  |
+| services/inventory.py, services/udhari.py                       |
+| - stock, catalog, and customer-credit operations                 |
++----------------------------+-------------------------------------+
+                             |
+               +-------------+-------------+
+               |                           |
+               v                           v
+      +------------------+       +----------------------+
+      | Groq APIs        |       | MongoDB               |
+      | Whisper: STT     |       | vendors               |
+      | LLM: extraction  |       | ledger                |
+      +------------------+       | inventory             |
+                                 | udhari                |
+                                 | autopilot_deliveries |
+                                 +----------------------+
+
+                         +----------------------+
+                         | React + Vite dashboard|
+                         | Vercel or local       |
+                         +-----------+----------+
+                                     |
+                                     v
+                         FastAPI REST API
+
+                         +----------------------+
+                         | APScheduler           |
+                         | 09:00 IST morning plan|
+                         +----------------------+
 ```
 
-Active WhatsApp vendors also receive the briefing automatically every morning
-at 09:00 IST by default. Delivery is recorded per vendor and date so scheduler
-restarts do not resend the same briefing. Configure the time with
-`DAILY_AUTOPILOT_HOUR` and `DAILY_AUTOPILOT_MINUTE`, or disable it with
-`ENABLE_DAILY_AUTOPILOT=false`.
-Use `GET /autopilot/preview?phone=...` to see the exact WhatsApp message
-without sending it. An authenticated admin can use
-`POST /admin/autopilot/send-now` to send today's message immediately to all
-eligible vendors; delivery remains idempotent for each vendor and date.
+### Main architectural idea
 
+The backend is the source of truth. WhatsApp and the dashboard are clients of
+the same backend services. This prevents a sale recorded from the dashboard
+from behaving differently from a sale spoken on WhatsApp.
 
----
-
-##  Table of Contents
-
-1. [Problem Statement](#problem-statement)
-2. [System Architecture](#system-architecture)
-3. [Feature Documentation](#feature-documentation)
-   - [WhatsApp Voice Ledger](#1-whatsapp-voice-ledger)
-   - [Conversational AI Engine](#2-conversational-ai-engine--counter-questions)
-   - [Smart Inventory Management](#3-smart-inventory-management)
-   - [AI Business Insights](#4-ai-business-insights--voice-narration)
-   - [Web Dashboard](#5-web-dashboard)
-   - [PDF Report Generation](#6-pdf-report-generation)
-4. [AI Pipeline & Model Architecture](#ai-pipeline--model-architecture)
-5. [Model Accuracy — How We Achieved It](#model-accuracy--how-we-achieved-it)
-6. [Tech Stack](#tech-stack)
-7. [API Reference](#api-reference)
-8. [Local Setup](#local-setup)
-9. [Environment Variables](#environment-variables)
+The application is intentionally not a collection of independent AI features.
+The AI is used at the language boundary; deterministic Python services validate
+and apply the resulting business actions.
 
 ---
 
-## Problem Statement
+## How audio is processed
 
-India's street vendors — vadapav sellers, chai wallahs, sabzi vendors — earn ₹500–₹2,000/day but have **zero financial visibility**. They can't access loans, can't track profits, and lose money without realizing it. The core barrier: **literacy and time**. Traditional bookkeeping apps assume typing ability and time to sit and enter data.
+The audio pipeline is implemented mainly in
+[services/voice_ledger.py](services/voice_ledger.py).
 
-VyapaarSaathi solves this by making bookkeeping as simple as talking.
+### Stage 1: WhatsApp receives the voice note
 
----
+The vendor records a voice note and sends it to the business WhatsApp number.
+Meta sends an inbound webhook event to:
 
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        USER INTERFACES                          │
-│   WhatsApp (Twilio)          Web Dashboard (React + Vite)       │
-└────────────────┬─────────────────────────────┬──────────────────┘
-                 │ Voice Note                   │ REST API calls
-                 ▼                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     FastAPI Backend (main.py)                   │
-│  /webhook  /record  /record/answer  /record/cancel              │
-│  /inventory  /entries  /ai-insights  /pdf  /suggestions         │
-└────────┬──────────────────┬───────────────────┬─────────────────┘
-         │                  │                   │
-         ▼                  ▼                   ▼
-┌─────────────┐  ┌──────────────────┐  ┌───────────────────────┐
-│ voice_ledger│  │conversation_     │  │   ai_insights.py      │
-│    .py      │  │  engine.py       │  │ (Analytics + LLM +    │
-│ Transcribe  │  │ Multi-turn chat  │  │  Dual TTS narration)  │
-│ Extract JSON│  │ Counter-questions│  └───────────┬───────────┘
-│ Save ledger │  │ Inventory checks │              │
-└──────┬──────┘  └────────┬─────────┘              │
-       │                  │                        │
-       ▼                  ▼                        ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    AI Services Layer                            │
-│   Groq Whisper (STT)    Groq Llama 3.3 70B (NLU)   gTTS (TTS) │
-└────────────────────────────────┬────────────────────────────────┘
-                                 │
-                                 ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       Supabase (PostgreSQL)                     │
-│         ledger table    inventory table    realtime enabled     │
-└─────────────────────────────────────────────────────────────────┘
+```text
+POST /webhook
 ```
 
----
+The webhook identifies the sender and the media object. The sender phone
+number becomes the vendor scope for all later database operations.
 
-## Feature Documentation
+### Stage 2: The backend downloads the media
 
-### 1. WhatsApp Voice Ledger
+The backend uses the WhatsApp Graph API credentials from the environment to
+download the audio file. It does not trust a client-provided vendor ID to
+choose whose data will be modified; the WhatsApp sender is the identity used
+for the operation.
 
-**File:** `services/voice_ledger.py`  
-**Endpoint:** `POST /webhook`
+### Stage 3: Audio conversion
 
-The core feature. A vendor sends a WhatsApp voice note like:
+WhatsApp audio can arrive in formats such as OGG/Opus. FFmpeg is used when
+conversion is required. The goal is to provide Whisper with a predictable
+audio input rather than relying on the original container or codec.
 
-> *"Aaj meine 50 vadapav beche, 1000 rupaye mile. Chai pe 200 kharch kiya."*
+### Stage 4: Speech-to-text
 
-The system does the following in a pipeline:
+The converted audio is sent to the configured Groq Whisper model, normally:
 
-#### Step 1 — Audio Download & Conversion
-- Twilio webhook fires with a media URL
-- Audio is downloaded with Twilio credentials (OGG/AMR format)
-- Converted to normalized MP3 using `ffmpeg` (16kHz, mono) for optimal Whisper performance
-
-#### Step 2 — Speech-to-Text (Whisper)
-- Primary: Local Whisper `large-v3` model running on-device for maximum accuracy with Hindi/Marathi
-- Fallback: Groq Whisper API (`whisper-large-v3-turbo`) if local model unavailable
-- Language hint set to `hi` (Hindi) to improve transcription of Hinglish
-- Audio is preprocessed (volume normalization, silence removal) before transcription
-
-#### Step 3 — Structured Data Extraction (Llama 3)
-- Transcript sent to Groq `llama-3.3-70b-versatile` with a carefully engineered system prompt
-- LLM extracts a structured JSON array of entries, each with:
-  - `intent`: `ADD_ENTRY` | `STOCK_UPDATE` | `PRICE_UPDATE` | `GET_REPORT`
-  - `type`: `income` | `expense`
-  - `category`: item name (normalized to lowercase)
-  - `amount`: rupee amount (float)
-  - `quantity`: count of items (float)
-  - `description`: human-readable summary
-- Validator fixes common LLM mistakes: sell words → type=income, amount=0 placeholder when qty given
-
-#### Step 4 — Conversation Engine Check
-- Before saving, entries pass through `conversation_engine.py`
-- Detects missing info and new inventory items
-- If complete → save immediately
-- If incomplete → generate counter-question and wait
-
-#### Step 5 — Save to Supabase
-- Each entry saved as a row in `ledger` table
-- If quantity is present, auto-deducts from `inventory.current_stock`
-- Current daily profit computed in real-time from all today's entries
-
-#### Step 6 — WhatsApp Reply
-- Confirmation sent back via Twilio API
-- Example reply: `Income ₹1,000 (50 vadapav)  Stock updated\nCurrent profit: ₹800`
-
----
-
-### 2. Conversational AI Engine — Counter Questions
-
-**File:** `services/conversation_engine.py`  
-**Endpoints:** `POST /record`, `POST /record/answer`, `POST /record/cancel`
-
-This is the most sophisticated feature — the system detects **incomplete** entries and asks follow-up questions instead of silently failing or saving wrong data.
-
-#### The Decision Tree
-
-```
-User says voice note
-       │
-       ▼
-Is there a pending conversation for this user?
-  ├── YES → process_follow_up_answer() → merge with pending
-  └── NO  → analyze_voice_input()
-               │
-               ├── Item in inventory + qty + amount? → SAVE 
-               ├── Item in inventory + qty, no amount, price known? → COMPUTE & SAVE 
-               ├── Item in inventory + amount, no qty, price known? → COMPUTE & SAVE 
-               ├── Item in inventory + qty, no amount, no price? → ASK AMOUNT 
-               ├── Item in inventory + nothing? → ASK QUANTITY 
-               ├── Item NOT in inventory + qty + amount? → AUTO-CREATE INVENTORY & SAVE 
-               └── Item NOT in inventory (anything missing)? → ASK PRICE+STOCK 
-                          │
-                          (User answers)
-                          │
-                          ▼
-               Item created in inventory
-               ASK: "Aaj kitne beche?" 
-                          │
-                          (User answers)
-                          │
-                          SAVE 
+```text
+whisper-large-v3-turbo
 ```
 
-#### Pending Conversation States
+The language is configured as `auto` by default so Hindi, Marathi, English,
+and Hinglish can be handled without forcing every vendor into one language.
+The result is a plain transcript.
 
-| Status | Trigger | Bot Question |
-|---|---|---|
-| `NEEDS_QUANTITY` | Item known, qty missing | "Kitne vadapav beche?" |
-| `NEEDS_AMOUNT` | Qty known but no price | "Kitne rupaye mile?" |
-| `NEEDS_BOTH` | Both missing | "Kitne beche aur kitne ka?" |
-| `NEW_ITEM` | Item not in inventory | "Price kya hai? Daily kitne banate ho?" |
-| `NEW_ITEM_SALE` | Inventory just created | "Aaj kitne beche?" |
+Example:
 
-#### Answer Extraction
-- Follow-up answers transcribed and re-sent to Groq LLM
-- Context-aware extraction prompt: LLM knows what question was asked
-- Fallback regex number extraction if LLM fails
-- State stored in-memory keyed by phone number (WhatsApp) or `web-client` (browser)
-
-#### TTS Counter Questions
-- Every counter-question has **audio generated** using gTTS
-- Both Hindi and English audio returned as base64-encoded MP3
-- Auto-plays in the web dashboard; sent as text in WhatsApp
-
----
-
-### 3. Smart Inventory Management
-
-**File:** `services/inventory.py`  
-**Endpoints:** `GET /inventory`, `POST /inventory`, `DELETE /inventory/{item}`
-
-A full daily inventory tracking system.
-
-#### Data Model
-Each inventory item has:
-- `daily_stock` — the vendor's planned production capacity per day
-- `current_stock` — how many are actually available right now
-- `price_per_unit` — selling price (auto-computed when sale is recorded)
-- `stock_date` — date-partitioned (one row per item per day)
-
-#### 3 Stock Update Modes
-
-| Mode | When Used | `daily_stock` | `current_stock` |
-|---|---|---|---|
-| **SET** (default) | Brand new item creation | Set to input | Set to input |
-| **ADD** (`add_stock=True`) | Voice: "20 samosa add karo" | Unchanged | +20 (capped at daily) |
-| **CATALOG UPDATE** (`update_catalog=True`) | Frontend form edit | Updated to new value | **Unchanged** |
-
-This prevents the bug where updating daily capacity from the UI would accidentally fill up the stock.
-
-#### Auto-Deduction
-When a voice entry with `quantity` is saved, `deduct_stock()` automatically reduces `current_stock`. Example:
-- Vendor says "30 samosa beche" → `current_stock` goes from 50 → 20
-
-#### Daily Stock Reset
-Every morning, `reset_daily_stock()` copies yesterday's catalog to today's date with `current_stock = daily_stock`. Yesterday's sales don't carry over — it's a fresh day.
-
-#### Inventory Source Merging
-`get_inventory()` merges two sources:
-1. Manual catalog rows from `inventory` table
-2. Auto-discovered items from 30 days of `ledger` entries
-Items only seen in voice records appear as "auto-detected" with sales history.
-
----
-
-### 4. AI Business Insights & Voice Narration
-
-**File:** `services/ai_insights.py`  
-**Endpoint:** `GET /ai-insights`
-
-A comprehensive analytics pipeline that reads real ledger data and produces a spoken business report.
-
-#### Analytics Pipeline (15+ Metrics)
-
-```
-Supabase Ledger Data
-      │
-      ▼
-Data Aggregation Layer
-  ├── Total Revenue (30 days)
-  ├── Total Expenses
-  ├── Net Profit & Margin
-  ├── Best Selling Day (day of week)
-  ├── Best Hour of Day
-  ├── Category Breakdown (top items)
-  ├── Revenue Trend (week-over-week)
-  ├── Expense Ratio
-  ├── Avg Daily Revenue
-  ├── Avg Transaction Value
-  ├── Revenue Volatility
-  ├── Growth Rate (this week vs last week)
-  ├── Peak Performance Days
-  ├── Business Health Score (0-100)
-  └── Custom Alerts (low margins, high volatility)
-      │
-      ▼
-Groq Llama 3.3 70B
-  (Generates conversational narrative in Hindi + English)
-      │
-      ▼
-gTTS Text-to-Speech
-  ├── Hindi MP3 audio (base64 encoded)
-  └── English MP3 audio (base64 encoded)
-      │
-      ▼
-API Response: metrics + text + audio (both languages)
+```text
+Aaj 30 samosa beche aur 600 rupaye mile
 ```
 
-#### Business Health Score Formula
-```
-Score = (
-  profit_margin_score (40%)   +
-  revenue_growth_score (30%)  +
-  consistency_score (30%)
-)
-```
-Where:
-- Profit margin > 40% → full score
-- Week-over-week growth > 10% → full score
-- Low volatility in daily revenue → high consistency score
+### Stage 5: Structured extraction
 
-#### Frontend: DualAudioPlayer
-- Toggle between Hindi 🇮🇳 and English 🇬🇧
-- Animated waveform visualization while playing
-- Health score ring with color coding (green/yellow/red)
-- Category revenue breakdown chart
+The transcript is sent to the configured Groq LLM. The model is asked to
+return structured JSON, not a conversational answer. The JSON can contain one
+or multiple entries because one sentence can contain multiple actions.
 
----
-
-### 5. Web Dashboard
-
-**Location:** `frontend/src/`  
-**Stack:** React 18 + TypeScript + Tailwind CSS + Zustand
-
-#### Pages
-
-| Page | Route | Feature |
-|---|---|---|
-| Home | `/` | Daily P&L summary, quick stats |
-| Ledger | `/ledger` | All transactions, filter by type |
-| Record | `/record` | Multi-turn voice recording UI |
-| Inventory | `/inventory` | Stock management with live indicators |
-| Insights | `/insights` | AI analytics + dual-language audio |
-| Profile | `/profile` | Vendor settings, language preference |
-
-#### Record Page — Conversation UI
-- Normal mode: dark "Start Recording" button
-- Answer mode: purple "Record Your Answer" button
-- Counter question card: auto-plays TTS audio, shows reason + category badge
-- Both Hindi and English audio playback controls
-- Cancel button to abort pending conversation
-
-#### State Management (Zustand)
-Key state fields:
-- `conversationMode`: `"normal"` | `"answering"`
-- `pendingEntry`: `{ reason, category }`
-- `counterQuestion`: `{ hi, en }`
-- `counterAudioHi` / `counterAudioEn`: base64 MP3
-
-Recording router: `startRecording()` checks `conversationMode` and routes blob to either `uploadRecording()` or `uploadAnswer()`.
-
----
-
-### 6. PDF Report Generation
-
-**File:** `services/report_generator.py`  
-**Endpoint:** `GET /api/report`
-
-Generates a professional Hindi+English P&L PDF covering the past 7 days:
-- Daily revenue/expense bars
-- Category-wise breakdown table
-- Net profit summary
-- Uploaded to Supabase Storage and sent as WhatsApp attachment
-
----
-
-## AI Pipeline & Model Architecture
-
-### Speech-to-Text: Whisper
-
-| Model | Usage | WER (Hindi) |
-|---|---|---|
-| `whisper-large-v3` (local) | Primary — maximum accuracy | ~8% |
-| `whisper-large-v3-turbo` (Groq API) | Fallback | ~10% |
-
-**Why local Whisper?**
-- No latency from API round-trips
-- Better handling of background noise (street environments)
-- No rate limiting
-- Processes Marathi regional accents better
-
-### Natural Language Understanding: Llama 3.3 70B
-
-**Model:** `llama-3.3-70b-versatile` via Groq API  
-**Latency:** ~400ms for extraction  
-**Task:** Convert Hindi/Marathi/Hinglish transcript → structured JSON
-
-**System prompt engineering:**
-- Explicit JSON schema with field descriptions
-- Examples of Hindi sales phrases and their JSON mappings
-- Intent classification guide (`ADD_ENTRY`, `STOCK_UPDATE`, etc.)
-- Response format enforced with `{"type": "json_object"}`
-
-### Text-to-Speech: gTTS
-
-- **Hindi:** Google TTS `lang="hi"` — natural Devanagari pronunciation
-- **English:** Google TTS `lang="en"` — clear business terminology
-- Output: MP3 → base64 string → embedded in API response
-- No file storage needed — generated on demand
-
----
-
-## Model Accuracy — How We Achieved It
-
-This is the core challenge: **understanding street vendor language** which is informal, noisy, code-switched (Hindi+English), and contains regional vocabulary.
-
-### Challenge 1: Hinglish Code-Switching
-Vendors say: *"Bhai, 50 vadapav sell kiye, 1k mila"*  
-Not: *"मैंने 50 वड़ापाव बेचे, ₹1000 मिले"*
-
-**Solution:** Whisper `large-v3` is multilingual and handles code-switching natively. The transcription prompt includes no forced language — Whisper auto-detects.
-
-### Challenge 2: Sell Intent Confusion
-LLMs sometimes classify *"mene samosa beche"* as expense (spent on samosa?) instead of income.
-
-**Solution:** Post-extraction validator:
-```python
-sell_words = ["bech", "sell", "sold", "bechi", "बेच", "बेची", "bej"]
-if any(w in description for w in sell_words):
-    entry.type = "income"  # Force-correct
-```
-
-### Challenge 3: Incomplete Information
-Vendors say partial sentences: *"aaj dhokla beche"* — no quantity, no amount.
-
-**Solution:** The Conversation Engine detects incompleteness and asks follow-up questions instead of saving wrong/zero data.
-
-### Challenge 4: New Item Recognition
-An item the vendor never registered before (dhokla, poha) would previously get saved with `amount=0`.
-
-**Solution:** Inventory lookup before saving. If item not found → trigger NEW_ITEM flow → create inventory entry → then record the sale.
-
-### Challenge 5: Fuzzy Item Name Matching
-Vendor may say "vadapav", "vada pav", "vdapav", or "wada pav" — all the same item.
-
-**Solution:** Three-level fuzzy matching:
-```python
-1. Exact match:     "vadapav" == "vadapav"
-2. No-space match:  "vada pav".replace(" ","") == "vadapav"
-3. Substring match: "vadapav" in "vadapav special" or vice versa
-```
-
-### Challenge 6: LLM Hallucinating Amounts
-If the vendor says "mene chai becha" with no amount, LLM sometimes guesses ₹50 or ₹100.
-
-**Solution:** Validation in `ExtractedEntry` Pydantic model:
-```python
-if quantity > 0 and amount <= 0:
-    amount = 0  # Placeholder — engine will ask or compute from price
-```
-A zero amount is treated as "missing" by the conversation engine.
-
-### Challenge 7: Regional Number Words
-*"Pachaas vadapav"* (fifty) — Whisper may transcribe as "50" or "पचास".
-
-**Solution:** LLM handles number word conversion natively. Fallback regex also extracts Hindi number words.
-
-### Accuracy Metrics (Tested on 200 voice samples)
-
-| Task | Accuracy |
-|---|---|
-| Intent classification (income/expense/stock/report) | 94% |
-| Amount extraction | 91% |
-| Quantity extraction | 88% |
-| Item name extraction | 96% |
-| New item detection | 100% (rule-based) |
-| End-to-end correct save (right amount + type) | 87% |
-
-**Baseline (no conversation engine):** 61% correct saves (39% had missing or wrong data)  
-**With conversation engine:** 87% correct saves (13% edge cases: strong accents, very noisy audio)
-
----
-
-## Tech Stack
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Backend** | FastAPI (Python) | REST API, webhook handler |
-| **Frontend** | React 18 + TypeScript + Tailwind | Web dashboard |
-| **State** | Zustand | Frontend state management |
-| **Build** | Vite | Frontend bundler |
-| **Database** | Supabase (PostgreSQL) | Ledger + inventory storage |
-| **STT** | OpenAI Whisper large-v3 (local) | Hindi/Marathi speech to text |
-| **NLU** | Groq Llama 3.3 70B | Intent + entity extraction |
-| **TTS** | gTTS (Google) | Hindi + English audio narration |
-| **WhatsApp** | Twilio WhatsApp Business API | Messaging + voice notes |
-| **Tunnel** | Cloudflare Tunnel (cloudflared) | Expose local to internet |
-| **Audio** | FFmpeg | Audio format conversion |
-| **PDF** | ReportLab | P&L report generation |
-| **Analytics** | Custom Python pipeline | 15+ business metrics |
-| **Scheduler** | APScheduler | Weekly summary cron |
-
----
-
-## API Reference
-
-### Core Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Server health + missing env check |
-| `POST` | `/webhook` | Twilio WhatsApp webhook |
-| `GET` | `/entries` | Fetch ledger entries |
-| `POST` | `/record` | Web voice recording upload |
-| `POST` | `/record/answer` | Submit follow-up voice answer |
-| `POST` | `/record/cancel` | Cancel pending conversation |
-| `GET` | `/inventory` | Fetch vendor inventory |
-| `POST` | `/inventory` | Add/update inventory item |
-| `DELETE` | `/inventory/{item}` | Remove inventory item |
-| `GET` | `/ai-insights` | AI business insights + audio |
-| `GET` | `/suggestions` | Stock reorder suggestions |
-| `GET` | `/api/report` | Generate PDF P&L report |
-| `GET` | `/score` | Business health score |
-
-### `/record` Response Structure
+Example:
 
 ```json
 {
-  "status": "complete" | "pending",
-  "transcript": "aaj meine 50 vadapav beche",
+  "entries": [
+    {
+      "intent": "ADD_ENTRY",
+      "type": "income",
+      "category": "samosa",
+      "quantity": 30,
+      "amount": 600,
+      "description": "30 samosa sold"
+    }
+  ]
+}
+```
+
+### Stage 6: Validation and business rules
+
+Pydantic validation and deterministic code run after the LLM. This is
+important: the model suggests structured data, but it does not directly write
+to the database.
+
+Examples of safeguards:
+
+- Selling words such as "becha", "beche", and "sell" are treated as income.
+- Missing amounts are not invented.
+- A `DELETE_ITEM` action requires a specific item name.
+- Udhari actions require a customer and a valid amount where appropriate.
+- Stock and price updates require valid positive values.
+- Vendor scope is applied before database writes.
+
+### Stage 7: Shared transcript processing
+
+The transcript is passed to `process_transcript_message()`. This function is
+shared by voice messages and text messages. From this point, both channels
+use the same extraction, follow-up, inventory, ledger, and reply behavior.
+
+### Stage 8: Response
+
+The backend sends a confirmation back to WhatsApp. If information is missing,
+it asks a follow-up question instead of saving an unreliable transaction.
+
+### How to explain it
+
+> "We use AI only to understand the vendor's language. After understanding,
+> deterministic business rules validate the result before anything is saved.
+> This gives us the flexibility of AI and the safety of normal application
+> logic."
+
+---
+
+## How text is processed
+
+Text messages do not need the audio stages.
+
+```text
+WhatsApp text
+    |
+    v
+Webhook identifies sender and text
+    |
+    v
+process_transcript_message(sender, text)
+    |
+    v
+Same extraction, validation, conversation, database, and reply pipeline
+```
+
+This allows messages such as:
+
+```text
+20 samosa beche 400 mile
+samosa ka stock 20 aur add karo
+Ramesh ne 500 udhari wapas ki
+inventory se chai delete karo
+```
+
+The system supports both voice and text without maintaining two separate
+bookkeeping implementations.
+
+---
+
+## The complete WhatsApp flow
+
+```text
+1. Vendor sends voice or text
+          |
+2. Meta sends webhook to FastAPI
+          |
+3. Backend identifies the vendor by WhatsApp phone
+          |
+4. Voice? Download -> convert -> Whisper transcript
+   Text? Use text directly
+          |
+5. LLM extracts one or more structured intents
+          |
+6. Pydantic and deterministic validation
+          |
+7. Conversation engine checks completeness
+          |
+8. If incomplete: save pending state and ask a question
+   If complete: apply ledger/inventory/udhari operation
+          |
+9. Build a human-readable response
+          |
+10. Send response through WhatsApp Graph API
+```
+
+### Multiple actions in one message
+
+The extractor can return multiple entries. For example:
+
+```text
+20 samosa beche, 400 rupaye aaye, doodh par 100 kharch kiya
+```
+
+becomes:
+
+1. Income for the samosa sale.
+2. Expense for milk.
+
+The application processes each validated entry while aggregating the final
+reply.
+
+---
+
+## Intent and data extraction
+
+The current extraction model supports these intents:
+
+| Intent | Meaning |
+|---|---|
+| `ADD_ENTRY` | Record income or expense |
+| `STOCK_UPDATE` | Add or update stock |
+| `PRICE_UPDATE` | Change an item's price |
+| `GET_REPORT` | Request a profit and loss report |
+| `GET_INVENTORY` | Request the current inventory |
+| `DELETE_ITEM` | Soft-delete one named inventory item |
+| `UDHARI_ADD` | Add customer credit |
+| `UDHARI_PAYMENT` | Record a customer payment |
+| `UDHARI_QUERY` | Ask about one customer's balance |
+| `UDHARI_REPORT` | Request the udhari report |
+
+For a normal ledger entry, the important fields are:
+
+```text
+intent, type, category, quantity, amount, description
+```
+
+The system keeps the raw business meaning separate from presentation. The
+dashboard and WhatsApp response can change without changing the stored ledger
+record.
+
+---
+
+## Conversation engine and follow-up questions
+
+The conversation engine in
+[services/conversation_engine.py](services/conversation_engine.py) prevents
+the system from saving incomplete transactions.
+
+### Example
+
+Vendor:
+
+```text
+Aaj samosa beche
+```
+
+The system may not know the quantity or amount. Instead of guessing, it
+creates a pending conversation:
+
+```text
+You sold samosa. How many did you sell?
+```
+
+The vendor answers with a second voice or text message. The answer is merged
+with the pending entry, validated again, and then saved.
+
+### Why this matters
+
+Without the conversation engine, an AI model might invent an amount or save a
+zero-value transaction. Asking one short question is safer than recording
+incorrect financial data.
+
+### Conversation states
+
+The onboarding and interaction states include:
+
+- New vendor
+- Awaiting consent
+- Awaiting name
+- Awaiting business category
+- Awaiting business name
+- Active vendor
+- Pending transaction follow-up
+
+Pending transaction state is currently process-memory based. A production
+deployment should use a shared persistent store if multiple backend instances
+are introduced.
+
+---
+
+## Ledger and inventory behavior
+
+### Ledger
+
+Ledger records are stored in MongoDB and are scoped by vendor phone variants.
+An entry contains the business event, amount, type, category, quantity, and
+timestamps needed for reports and trends.
+
+Income and expense are kept separate:
+
+```text
+net result = total income - total expenses
+```
+
+### Inventory
+
+Inventory is managed by [services/inventory.py](services/inventory.py).
+Important fields include:
+
+- `item_name`
+- `daily_stock`
+- `current_stock`
+- `price_per_unit`
+- `unit`
+- `stock_date`
+- `is_active`
+
+### Stock operations
+
+| Operation | Example | Result |
+|---|---|---|
+| Create/set | "Aaj 50 samosa banaye" | Creates item and stock |
+| Restock | "20 samosa aur add karo" | Increases current stock |
+| Catalog update | Dashboard edit | Changes planned daily stock |
+| Sale deduction | "10 samosa beche" | Decreases current stock |
+| Soft delete | "samosa inventory se delete karo" | Sets `is_active=false` |
+
+Deleting an inventory item is intentionally a soft delete. Historical ledger
+records remain available for reports.
+
+An ambiguous command such as "inventory delete karo" is rejected because the
+application requires a specific item name.
+
+### Daily stock
+
+Inventory can be reset for a new business day through the daily stock reset
+logic. The system keeps the vendor's catalog and daily availability separate
+from historical sales.
+
+---
+
+## Udhari flow
+
+Udhari means customer credit or money owed.
+
+Examples:
+
+```text
+Ramesh ko 500 udhari diya
+Ramesh ne 200 wapas kiye
+Ramesh ka udhari kitna hai?
+```
+
+The system:
+
+1. Identifies the customer.
+2. Records credit or payment.
+3. Calculates outstanding balance.
+4. Uses the balance and age in reports and Autopilot recommendations.
+
+Udhari is stored separately from normal income and expense so that a payment
+does not get confused with a new sale.
+
+---
+
+## Business Autopilot morning alert
+
+Business Autopilot is an explainable recommendation engine in
+[services/autopilot.py](services/autopilot.py). It is deliberately
+deterministic. It does not place orders or automatically contact a customer's
+phone.
+
+### Data used
+
+For each vendor, it reads:
+
+- The last 14 days of ledger activity.
+- Current inventory.
+- Outstanding udhari.
+- Recent item quantities.
+
+### Recommendations
+
+It can produce up to five prioritized actions:
+
+1. Restock an item with low or zero stock.
+2. Follow up on old or large outstanding udhari.
+3. Record today's business if there is recent history but no entry today.
+4. Review costs when the recent average net result is negative.
+5. Keep the strongest tracked item ready based on recent quantities.
+
+Each recommendation includes:
+
+- Priority: high, medium, or low.
+- Human-readable message.
+- Reason based on actual vendor data.
+- Supporting data.
+- Dashboard action link.
+
+### WhatsApp delivery
+
+The scheduler uses APScheduler with the `Asia/Kolkata` timezone. The current
+default configuration is:
+
+```env
+ENABLE_DAILY_AUTOPILOT=true
+DAILY_AUTOPILOT_HOUR=9
+DAILY_AUTOPILOT_MINUTE=0
+```
+
+At 09:00 IST, while the backend is running:
+
+1. Active WhatsApp vendors are selected.
+2. A fresh plan is generated separately for each vendor.
+3. The plan is formatted as a WhatsApp message.
+4. The message is sent through the WhatsApp Graph API.
+5. A record is stored in `autopilot_deliveries`.
+
+The delivery record prevents duplicate automatic delivery to the same vendor
+on the same date. If the server is offline at 09:00, the current scheduler
+does not automatically catch up later.
+
+### Admin testing and broadcast
+
+The admin dashboard has a **Morning Plan** broadcast mode. This is different
+from a normal typed broadcast:
+
+- Normal broadcast: sends the same manually typed message to recipients.
+- Morning Plan: generates each recipient's real vendor-specific plan and uses
+  the same formatter and sender as the automatic morning job.
+
+Relevant endpoints:
+
+```text
+GET  /autopilot?phone=<phone>
+GET  /autopilot/preview?phone=<phone>
+POST /admin/autopilot/send-now
+POST /admin/autopilot/broadcast
+```
+
+The admin endpoints require a valid admin JWT. Delivery responses include
+sent recipients and per-recipient failure reasons.
+
+### Example morning message
+
+```text
+🌅 VyapaarSaathi — Aaj ka Business Plan
+
+1. Restock samosa
+samosa has 8 pieces left. Prepare about 42 more.
+💡 Kyun: Current stock is 8/50 of today's target.
+
+2. Follow up with Ramesh
+Ramesh has ₹2,000 outstanding.
+💡 Kyun: The balance has been open for 12 days.
+
+Dashboard par detail dekhne ke liye VyapaarSaathi kholein.
+```
+
+If there is no urgent recommendation, the vendor receives a positive
+no-action message instead of an empty response.
+
+---
+
+## Web dashboard
+
+The frontend is in [frontend/src](frontend/src) and uses React, TypeScript,
+Vite, Tailwind-style utility classes, and Zustand.
+
+### Main screens
+
+| Screen | Purpose |
+|---|---|
+| Home | Today's result, key metrics, recent activity, and Business Plan |
+| Ledger | Review and manage income and expenses |
+| Record | Record voice entries and answer follow-up questions |
+| Inventory | View stock, prices, and catalog items |
+| Udhari | Manage customer credit and payments |
+| Insights | View analytics and narrated business insights |
+| Profile | Vendor settings and language |
+| Admin | Vendor management, system statistics, and broadcast tools |
+
+The Business Plan is intentionally shown at the bottom of the vendor dashboard.
+WhatsApp is the primary morning delivery channel; the dashboard is the
+secondary place to review details.
+
+### Language support
+
+The shared language state supports:
+
+```text
+English, Hindi, Marathi, Hinglish
+```
+
+The landing page, dashboard layout, onboarding, and profile use the same
+persisted language preference.
+
+### Frontend API behavior
+
+During local development, Vite proxies API paths to
+`http://127.0.0.1:8000`. In a separate deployment, set:
+
+```env
+VITE_API_URL=https://your-backend-domain.example
+```
+
+Only public API URLs belong in Vite variables. Never expose API tokens or
+database credentials in frontend environment variables.
+
+---
+
+## AI insights and reports
+
+The project has two different AI patterns:
+
+### 1. Transaction understanding
+
+Groq Whisper and the configured Groq LLM translate a vendor's voice or text
+into safe structured actions.
+
+### 2. Business analysis
+
+The insights service aggregates ledger data and can produce:
+
+- Revenue and expense totals.
+- Net result and margin.
+- Category performance.
+- Recent trends.
+- Average daily revenue.
+- Business health indicators.
+- Explanations and recommendations.
+
+Reports can be generated as PDF files through the report endpoint.
+
+The key design principle is that analytics read vendor data; they do not
+silently modify the ledger.
+
+---
+
+## Security and vendor isolation
+
+Security is especially important because one application serves multiple
+vendors.
+
+### Vendor scope
+
+- WhatsApp requests are scoped from the sender phone number.
+- Database queries use normalized phone variants.
+- Inventory, ledger, and udhari operations use the current vendor scope.
+- Autopilot builds a separate plan for each vendor.
+
+### Admin security
+
+Admin endpoints use JWT authentication and require the `admin` role. Examples
+include vendor management, statistics, uploads, and broadcast operations.
+
+### Secrets
+
+Secrets are loaded from `.env` and are not committed to the repository:
+
+- WhatsApp access token.
+- WhatsApp phone number ID.
+- Groq API key.
+- MongoDB URI.
+- JWT secret and related auth settings.
+
+The `.env.example` file documents variable names and safe defaults only.
+
+### Safe AI boundary
+
+The LLM is not trusted as a database writer. Its output is:
+
+```text
+LLM output -> schema validation -> business rules -> database operation
+```
+
+This design makes errors visible and limits the effect of hallucinated fields.
+
+---
+
+## Deployment architecture
+
+### Development
+
+```text
+Mac or developer machine
+  ├── FastAPI on port 8000
+  ├── Vite on port 5173
+  └── Cloudflare tunnel for local webhook testing
+```
+
+### Free production-oriented setup
+
+```text
+Vercel
+  └── React/Vite frontend
+
+Always-on VM or suitable backend host
+  └── FastAPI + APScheduler + HTTPS reverse proxy
+
+MongoDB provider
+  └── Persistent application data
+```
+
+The backend must remain running for the 09:00 IST scheduler. A sleeping
+server can miss the scheduled job. For an always-running free setup, an
+always-on VM is preferable to a free web host that spins down when idle.
+
+Aiven can provide managed databases and infrastructure services, but it does
+not host this FastAPI process as a free application server. The current code
+uses MongoDB, so moving to an Aiven PostgreSQL service would require a
+database-layer migration.
+
+### Production command
+
+Do not use `--reload` in production:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Use a process manager such as systemd, Docker, or the hosting platform's
+service manager so the backend restarts after a machine reboot.
+
+---
+
+## API reference
+
+### Public and vendor endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Health status and missing environment check |
+| `POST` | `/webhook` | Receive WhatsApp events |
+| `GET` | `/webhook` | Verify the WhatsApp webhook |
+| `POST` | `/record` | Process a web voice recording |
+| `POST` | `/record/answer` | Process a follow-up recording |
+| `POST` | `/record/cancel` | Cancel a pending conversation |
+| `GET` | `/entries` | Read vendor ledger entries |
+| `GET` | `/inventory` | Read vendor inventory |
+| `POST` | `/inventory` | Create or update an item |
+| `DELETE` | `/inventory/{item}` | Soft-delete an item |
+| `GET` | `/udhari` | Read udhari data |
+| `GET` | `/autopilot` | Read a vendor's Business Plan |
+| `GET` | `/autopilot/preview` | Preview the exact WhatsApp plan text |
+| `GET` | `/ai-insights` | Read business analytics |
+| `GET` | `/api/report` | Generate a business report |
+
+### Protected admin endpoints
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/admin/stats` | Platform or vendor statistics |
+| `GET` | `/admin/vendors` | List vendors |
+| `GET` | `/admin/vendors/{phone}/details` | Read vendor details |
+| `POST` | `/admin/broadcast` | Send a normal typed/media broadcast |
+| `POST` | `/admin/autopilot/send-now` | Send today's plan to eligible vendors |
+| `POST` | `/admin/autopilot/broadcast` | Send generated plans to a chosen audience |
+| `POST` | `/admin/upload-media` | Upload broadcast media |
+| `GET` | `/admin/audit-logs` | Read admin activity |
+
+### Important response states
+
+The recording API can return:
+
+```json
+{
+  "status": "complete",
+  "transcript": "aaj 20 samosa beche",
   "data": {
-    "total_earned": 1000.0,
-    "total_spent": 0.0,
-    "items_sold": [{"item_name": "vadapav", "amount": 1000}]
-  },
+    "total_earned": 400,
+    "total_spent": 0
+  }
+}
+```
+
+or a pending follow-up:
+
+```json
+{
+  "status": "pending",
   "pending_reason": "NEEDS_QUANTITY",
-  "pending_category": "dhokla",
-  "counter_question_hi": "आपने dhokla बेचे — कितने बेचे?",
-  "counter_question_en": "You sold dhokla — how many?",
-  "counter_audio_hi": "<base64 mp3>",
-  "counter_audio_en": "<base64 mp3>"
+  "pending_category": "samosa",
+  "counter_question_hi": "आपने samosa बेचे - कितने?",
+  "counter_question_en": "You sold samosa - how many?"
 }
 ```
 
 ---
 
-## Local Setup
+## Technology stack
+
+| Layer | Technology | Role |
+|---|---|---|
+| API | FastAPI | REST API and WhatsApp webhook |
+| Language | Python | Business logic and integrations |
+| Frontend | React + TypeScript | Vendor and admin dashboard |
+| Build | Vite | Frontend development and production build |
+| State | Zustand | Frontend state and API-backed workflow state |
+| Database | MongoDB | Vendors, ledger, inventory, udhari, delivery records |
+| Speech-to-text | Groq Whisper | Voice transcription |
+| Language understanding | Groq LLM | Intent and field extraction |
+| Text-to-speech | gTTS where used | Spoken insight/follow-up audio |
+| Messaging | Meta WhatsApp Cloud API | Incoming/outgoing WhatsApp messages |
+| Audio tools | FFmpeg | Audio conversion |
+| PDF | ReportLab | Business report generation |
+| Scheduler | APScheduler | Daily and periodic jobs |
+| Local tunnel | Cloudflare Tunnel | Local webhook testing |
+
+---
+
+## Local development
 
 ### Prerequisites
-- Python 3.11+
+
+- Python 3.9+ (the repository's current virtual environment uses Python 3.9)
 - Node.js 18+
 - FFmpeg
-- Cloudflared (for WhatsApp webhook tunnel)
+- MongoDB connection
+- Meta WhatsApp Cloud API credentials
+- Groq API key
+- Cloudflared for local WhatsApp webhook testing
 
-### 1. Backend Setup
+### Backend
 
 ```bash
-# Clone and enter project
-cd VyapaarSaathi
+git clone https://github.com/Atharv7108/VyapaarSaathi-2.0.git
+cd VyapaarSaathi-2.0
 
-# Create virtual environment
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
-# Install ffmpeg (macOS)
-brew install ffmpeg
-
-# Copy and fill environment variables
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with real values. Never commit .env.
 
-# Run database schema
-# → Open Supabase SQL editor, paste contents of db/schema.sql
-
-# Start backend
 uvicorn main:app --reload --port 8000
 ```
 
-### 2. Frontend Setup
+### Frontend
+
+In a second terminal:
 
 ```bash
-# Install frontend dependencies (from project root)
 npm install
-
-# Start frontend dev server
 npm run dev
-# → Opens at http://127.0.0.1:5173
 ```
 
-### 3. WhatsApp Webhook (local testing)
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+The Vite proxy forwards API calls to port 8000.
+
+### Local WhatsApp webhook
+
+Start a public tunnel to the backend:
 
 ```bash
-# Start Cloudflare tunnel (no auth required)
 cloudflared tunnel --url http://127.0.0.1:8000
+```
 
-# Copy the generated URL, e.g.:
-# https://example-name.trycloudflare.com
+Use the generated HTTPS URL in Meta's WhatsApp webhook configuration:
 
-# Go to: https://console.twilio.com → WhatsApp Sandbox
-# Set webhook URL to: https://example-name.trycloudflare.com/webhook
-# Method: POST → Save
+```text
+https://your-tunnel.trycloudflare.com/webhook
+```
+
+For a stable production webhook, use a permanent backend domain and HTTPS
+instead of a temporary tunnel.
+
+### Run tests and build
+
+```bash
+PYTHONPATH=. pytest -q
+python -m py_compile main.py scheduler.py services/*.py
+npm run build
 ```
 
 ---
 
-## Environment Variables
+## Environment variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `TWILIO_ACCOUNT_SID` | ✅ | — | Twilio account SID |
-| `TWILIO_AUTH_TOKEN` | ✅ | — | Twilio auth token |
-| `TWILIO_WHATSAPP_NUMBER` | ✅ | — | Twilio WhatsApp number |
-| `GROQ_API_KEY` | ✅ | — | Groq API key (Whisper + Llama) |
-| `SUPABASE_URL` | ✅ | — | Supabase project URL |
-| `SUPABASE_KEY` | ✅ | — | Supabase anon/service key |
-| `GROQ_LLM_MODEL` | ❌ | `llama-3.3-70b-versatile` | LLM model for extraction |
-| `GROQ_WHISPER_MODEL` | ❌ | `whisper-large-v3-turbo` | Whisper API model |
-| `FFMPEG_BINARY` | ❌ | `ffmpeg` | Path to ffmpeg binary |
-| `TWILIO_VALIDATE_SIGNATURE` | ❌ | `true` | Disable for Cloudflare tunnel |
-| `ENABLE_WEEKLY_SUMMARY` | ❌ | `false` | Enable weekly cron job |
+The real `.env` is private. Use `.env.example` as the template.
+
+| Variable | Required | Default | Purpose |
+|---|---:|---|---|
+| `WHATSAPP_API_TOKEN` | Yes | - | Meta WhatsApp access token |
+| `WHATSAPP_PHONE_NUMBER_ID` | Yes | - | Meta WhatsApp sender ID |
+| `WHATSAPP_BUSINESS_ACCOUNT_ID` | No | - | Meta business account ID |
+| `WHATSAPP_WEBHOOK_VERIFY_TOKEN` | Yes | - | Webhook verification secret |
+| `GROQ_API_KEY` | Yes | - | Groq Whisper and LLM access |
+| `MONGODB_URI` | Yes | - | MongoDB connection string |
+| `MONGODB_DB_NAME` | No | `vyapaarsaathi` | MongoDB database name |
+| `GROQ_LLM_MODEL` | No | configured model | Structured extraction model |
+| `GROQ_WHISPER_MODEL` | No | `whisper-large-v3-turbo` | Speech-to-text model |
+| `GROQ_WHISPER_LANGUAGE` | No | `auto` | Voice language mode |
+| `FFMPEG_BINARY` | No | `ffmpeg` | FFmpeg executable |
+| `ENABLE_DAILY_AUTOPILOT` | No | `true` | Enable morning plans |
+| `DAILY_AUTOPILOT_HOUR` | No | `9` | Morning hour in IST |
+| `DAILY_AUTOPILOT_MINUTE` | No | `0` | Morning minute |
+| `ENABLE_INSTANT_STOCK_ALERTS` | No | `true` | Enable proactive stock alerts |
+| `INSTANT_STOCK_ALERT_INTERVAL_SECONDS` | No | `60` | Stock-alert polling interval |
+| `INSTANT_STOCK_ALERT_UNITS_THRESHOLD` | No | `20` | Low-stock threshold |
+| `INSTANT_STOCK_ALERT_RECIPIENTS` | No | empty | Optional alert recipients |
+| `ENABLE_WEEKLY_SUMMARY` | No | `false` | Enable weekly summary job |
+
+### Scheduler confirmation
+
+When the backend starts, look for:
+
+```text
+Daily Autopilot scheduler enabled (09:00 IST).
+```
+
+At delivery time, the backend reports sent, skipped, and failed vendors. A
+server that is stopped at 09:00 can miss that run; an always-on deployment is
+required for reliable automatic delivery.
 
 ---
 
-## Project Structure
+## Project structure
 
-```
+```text
 VyapaarSaathi/
-├── main.py                        # FastAPI app — all endpoints
-├── scheduler.py                   # Weekly summary cron
-├── supabase_config.py             # Supabase client
-├── requirements.txt               # Python dependencies
+├── main.py                         FastAPI app, webhook, REST, admin APIs
+├── scheduler.py                    APScheduler registration and lifecycle
+├── db_config.py                    MongoDB connection
+├── requirements.txt                Python dependencies
+├── .env.example                    Safe configuration template
 ├── services/
-│   ├── voice_ledger.py            # STT → Extract → Save pipeline
-│   ├── conversation_engine.py     # Multi-turn conversation logic
-│   ├── inventory.py               # Inventory CRUD + stock management
-│   ├── ai_insights.py             # Analytics + LLM + TTS narration
-│   ├── report_generator.py        # PDF P&L generator
-│   ├── stock_suggestions.py       # AI reorder suggestions
-│   ├── settings.py                # Environment config
-│   └── twilio_security.py        # Request signature validation
+│   ├── autopilot.py                Plan generation and WhatsApp delivery
+│   ├── voice_ledger.py             Audio, extraction, saving, replies
+│   ├── conversation_engine.py      Follow-up and completeness logic
+│   ├── inventory.py                Inventory and stock operations
+│   ├── udhari.py                   Customer credit operations
+│   ├── vendor_manager.py           Vendor identity and onboarding
+│   ├── ai_insights.py              Analytics and insight generation
+│   ├── report_generator.py         PDF report creation
+│   ├── stock_suggestions.py         Stock suggestions
+│   └── settings.py                 Environment configuration
 ├── frontend/
 │   └── src/
-│       ├── pages/
-│       │   ├── Home.tsx           # Dashboard
-│       │   ├── Ledger.tsx         # Transaction history
-│       │   ├── Record.tsx         # Multi-turn voice UI
-│       │   ├── Inventory.tsx      # Stock management
-│       │   ├── Insights.tsx       # AI insights + audio player
-│       │   └── Profile.tsx        # Vendor settings
-│       ├── store/
-│       │   └── useStore.ts        # Zustand state (incl. conversation state)
-│       ├── components/
-│       │   └── Layout.tsx         # Navigation + layout
-│       └── App.tsx                # Router
-├── db/
-│   └── schema.sql                 # Supabase table definitions
-└── vite.config.js                 # Vite + API proxy config
+│       ├── pages/                  Vendor and admin screens
+│       ├── components/             Shared UI components
+│       ├── store/useStore.ts       Zustand state and API calls
+│       └── App.tsx                 Frontend routing
+├── tests/                           Backend tests
+├── static/                          Runtime/static files
+├── start.sh                         Local multi-process launcher
+└── vite.config.js                   Vite root, build, and API proxy
 ```
 
 ---
 
-## Future Roadmap
+## Presentation walkthrough
 
-- [ ] **Multi-vendor support** — proper auth with phone-based sessions
-- [ ] **Supabase-persisted conversation state** — survive server restarts
-- [ ] **Whisper fine-tuning** — train on Indian street vendor vocabulary
-- [ ] **Hindi number word normalization** — "pachaas" → 50 at pre-processing stage
-- [ ] **GST categorization** — auto-tag entries for tax purposes
-- [ ] **UPI integration** — auto-import transactions from UPI apps
-- [ ] **Offline mode** — PWA with local-first storage
-- [ ] **Voice in replies** — WhatsApp sends audio reply, not just text
+The following is a simple five-minute demonstration.
+
+### Slide 1: Problem
+
+> "Small vendors do business in natural language, but bookkeeping tools expect
+> forms and typing. This causes missing records, unknown profit, and forgotten
+> customer credit."
+
+### Slide 2: Product
+
+Show the vendor sending:
+
+```text
+20 samosa beche, 400 mile
+```
+
+Explain that the same system accepts a WhatsApp voice note or text.
+
+### Slide 3: AI pipeline
+
+Use this sequence:
+
+```text
+Voice -> download -> FFmpeg -> Whisper -> transcript
+      -> LLM JSON -> validation -> business rules -> MongoDB
+      -> WhatsApp confirmation
+```
+
+Say:
+
+> "The AI understands language, but deterministic code decides what is safe to
+> save. That separation is our reliability layer."
+
+### Slide 4: Conversation safety
+
+Send an incomplete message such as:
+
+```text
+Aaj samosa beche
+```
+
+Show the follow-up question. Explain that the application asks instead of
+inventing an amount or quantity.
+
+### Slide 5: Business records
+
+Open the dashboard and show:
+
+- Ledger entry.
+- Inventory deduction.
+- Current profit.
+- Udhari balance.
+
+Explain that these are different views over vendor-scoped business data.
+
+### Slide 6: Business Autopilot
+
+Show the Business Plan at the bottom of the dashboard or use the WhatsApp
+preview. Explain that it combines:
+
+- 14 days of business activity.
+- Current stock.
+- Outstanding udhari.
+
+Then show the automatic delivery configuration:
+
+```text
+09:00 IST every day
+```
+
+### Slide 7: Safety and operations
+
+Mention:
+
+- Vendor isolation by WhatsApp phone.
+- Admin JWT protection.
+- Soft deletion for inventory.
+- Duplicate-delivery protection.
+- Delivery failure reporting.
+- Environment secrets kept outside source code.
+
+### One-minute technical summary
+
+> "VyapaarSaathi is a FastAPI backend with a React dashboard and MongoDB.
+> WhatsApp is the primary input and delivery channel. Audio is transcribed by
+> Groq Whisper, language is converted to structured intents by a Groq LLM, and
+> deterministic Python services validate and save the result. The conversation
+> engine asks follow-up questions when data is incomplete. Business Autopilot
+> reads the last 14 days, inventory, and udhari to send an explainable,
+> vendor-specific plan at 09:00 IST."
 
 ---
 
-## Why This Matters
+## Known limitations and next steps
 
-India has **63 million** unorganized micro-enterprises. Less than **2%** maintain any financial records. VyapaarSaathi makes bookkeeping as easy as talking to a friend — no literacy required, no time investment, no learning curve. The AI handles everything: understanding regional language, filling in missing details, tracking inventory, and generating insights that help vendors earn more.
+### Current limitations
 
-> *Built for Bharat. Powered by AI.*
+- The backend scheduler requires the server to be running at the scheduled
+  time; missed runs do not currently catch up automatically.
+- Pending conversation state is process-memory based and is not yet shared
+  between multiple backend instances.
+- Free hosting providers may sleep, restart, or limit outbound traffic.
+- WhatsApp proactive messages may require Meta-approved templates outside the
+  24-hour customer-service window.
+- The frontend production bundle is large and can be code-split further.
+
+### Recommended next steps
+
+- Add a restart catch-up check for today's undelivered Autopilot message.
+- Persist pending conversation state in MongoDB or Redis.
+- Add a delivery status page with scheduler health and last-run time.
+- Add approved WhatsApp templates for proactive messages outside the 24-hour
+  window.
+- Add role-based admin permissions beyond the current admin role.
+- Split large frontend routes with dynamic imports.
+- Add end-to-end tests against a mocked WhatsApp Graph API.
 
 ---
 
-*Last updated: March 2026 | Built with love for India's entrepreneurs*
+## Why this matters
+
+VyapaarSaathi makes financial record keeping as natural as speaking to a
+trusted assistant. It is designed for vendors who should not have to learn
+accounting software before they can understand their own business.
+
+> **Built for Bharat. Powered by voice, AI, and explainable business logic.**
+
+*Last updated: October 2026*
