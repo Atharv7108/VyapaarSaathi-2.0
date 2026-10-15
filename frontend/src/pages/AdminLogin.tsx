@@ -57,9 +57,11 @@ export default function AdminLogin() {
         <div className="bg-slate-900/90 backdrop-blur-xl border border-slate-800 rounded-3xl shadow-2xl p-8 sm:p-10">
           {/* Header */}
           <div className="flex flex-col items-center mb-8 text-center">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-orange-500 to-amber-400 flex items-center justify-center text-white mb-4 shadow-lg shadow-orange-500/20">
-              <ShieldCheck className="w-8 h-8" />
-            </div>
+            <img
+              src={`${import.meta.env.BASE_URL}logo.png`}
+              alt="VyapaarSaathi Logo"
+              className="h-16 w-auto object-contain mb-3"
+            />
             <h1 className="text-2xl font-black text-white">Admin Authentication</h1>
             <p className="text-xs text-slate-400 mt-1 max-w-xs">
               VyapaarSaathi Enterprise Portal • Protected by JWT & Audit Logging

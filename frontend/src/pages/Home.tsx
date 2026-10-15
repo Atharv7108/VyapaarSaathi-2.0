@@ -162,8 +162,8 @@ export default function Home() {
       {/* ── Welcome Banner / Top Greeting ─────────────────────────────────── */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200/80 rounded-2xl px-5 py-3.5 shadow-xs">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center font-black text-lg">
-            {userName ? userName.charAt(0).toUpperCase() : "V"}
+          <div className="w-10 h-10 rounded-xl bg-orange-100 text-orange-600 flex items-center justify-center font-black text-lg overflow-hidden p-1">
+            {userName ? userName.charAt(0).toUpperCase() : <img src={`${import.meta.env.BASE_URL}logo.png`} alt="VyapaarSaathi" className="w-6 h-6 object-contain" />}
           </div>
           <div>
             <h1 className="text-base sm:text-lg font-black text-slate-900">

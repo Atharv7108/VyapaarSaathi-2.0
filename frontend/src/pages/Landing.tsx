@@ -323,7 +323,11 @@ export default function Landing() {
               <div className="rounded-3xl overflow-hidden shadow-2xl shadow-black/40 border border-white/10">
                 {/* Chat header */}
                 <div className="flex items-center gap-3 px-4 py-3 bg-[#075E54]">
-                  <div className="w-9 h-9 rounded-full bg-orange-500 flex items-center justify-center text-white font-bold text-sm">VS</div>
+                  <img
+                    src={`${import.meta.env.BASE_URL}logo.png`}
+                    alt="VyapaarSathi"
+                    className="w-9 h-9 rounded-full object-contain bg-white p-0.5 shadow-sm"
+                  />
                   <div>
                     <p className="text-white font-bold text-sm">VyapaarSathi Bot</p>
                     <p className="text-green-300 text-xs">{t("● Online · WhatsApp", "● ऑनलाइन · WhatsApp")}</p>
@@ -417,7 +421,11 @@ export default function Landing() {
             <div className="rounded-3xl overflow-hidden shadow-2xl shadow-slate-900/30 border border-white/60">
               {/* Chat header */}
               <div className="flex items-center gap-3 px-4 py-3.5 bg-[#075E54]">
-                <div className="w-11 h-11 rounded-full bg-[#25D366] flex items-center justify-center text-xl flex-shrink-0">🤖</div>
+                <img
+                  src={`${import.meta.env.BASE_URL}logo.png`}
+                  alt="VyapaarSathi"
+                  className="w-11 h-11 rounded-full object-contain bg-white p-0.5 shadow-sm flex-shrink-0"
+                />
                 <div className="flex-1">
                   <p className="text-white font-bold text-sm leading-tight">VyaparSathi Bot</p>
                   <p className="text-[rgba(255,255,255,0.7)] text-xs">{t("● Online · WhatsApp Business", "● ऑनलाइन · WhatsApp Business")}</p>

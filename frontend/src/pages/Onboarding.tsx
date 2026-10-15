@@ -65,6 +65,15 @@ export default function Onboarding() {
     <div className={`min-h-screen bg-slate-100 flex flex-col items-center justify-center p-4`}>
 
       <div className={`w-full max-w-md rounded-3xl ${bgMain} p-6 sm:p-8 shadow-2xl transition-all`}>
+        {/* Brand Logo */}
+        <div className="flex justify-center mb-5">
+          <img
+            src={`${import.meta.env.BASE_URL}logo.png`}
+            alt="VyapaarSaathi"
+            className="h-12 w-auto object-contain"
+          />
+        </div>
+
         {/* Step Indicator */}
         <div className="mb-6 flex items-center justify-center gap-2">
           {[1, 2, 3].map((s) => (

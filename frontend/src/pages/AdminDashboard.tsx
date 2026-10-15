@@ -949,20 +949,16 @@ export default function AdminDashboard() {
       <aside style={S.sidebar}>
         {/* Brand */}
         <div style={{ padding: "16px 18px", display: "flex", alignItems: "center", gap: 12, borderBottom: "1px solid #1F242B" }}>
-          <div
+          <img
+            src={`${import.meta.env.BASE_URL}logo.png`}
+            alt="VyapaarSaathi Logo"
             style={{
-              width: 30,
-              height: 30,
-              borderRadius: 6,
-              background: "#F97316",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
+              width: 32,
+              height: 32,
+              objectFit: "contain",
               flexShrink: 0,
             }}
-          >
-            <span style={{ fontWeight: 700, color: "#FFFFFF", fontSize: 13, letterSpacing: "-0.02em" }}>VS</span>
-          </div>
+          />
           <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
             <span style={{ fontSize: 14, fontWeight: 600, color: "#E6E8EB", letterSpacing: "-0.01em", lineHeight: 1.2 }}>
               VyapaarSaathi
