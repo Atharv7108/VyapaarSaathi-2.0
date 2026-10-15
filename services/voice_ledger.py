@@ -153,7 +153,12 @@ def _get_cached_inventory(phone: str, loader: Any) -> List[Dict[str, Any]]:
 
 
 def invalidate_inventory_cache(phone: str) -> None:
-    _inventory_cache.pop(phone, None)
+    # The same vendor can be cached under the webhook identifier or its
+    # normalized catalog identifier.
+    from services.vendor_manager import _normalize_phone, get_phone_variants
+
+    for key in set(get_phone_variants(phone)) | {_normalize_phone(phone), phone}:
+        _inventory_cache.pop(key, None)
 
 
 class ExtractedEntry(BaseModel):

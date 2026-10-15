@@ -2273,8 +2273,12 @@ def remove_inventory_item(item_name: str, vendor_id: str = "", phone: str = "") 
     else:
         phone_key = _normalize_phone(phone_key)
     try:
-        delete_inventory_item(phone=phone_key, item_name=item_name)
+        deleted = delete_inventory_item(phone=phone_key, item_name=item_name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Inventory item not found: {item_name}")
         return {"deleted": item_name}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
 
@@ -2666,4 +2670,3 @@ if os.path.exists("web"):
         if os.path.isfile(candidate):
             return FileResponse(candidate)
         return FileResponse("web/index.html")
-

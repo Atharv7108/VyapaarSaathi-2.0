@@ -27,6 +27,11 @@ TABLE = "inventory"
 LEDGER = "ledger"
 
 
+def _normalize_item_name(item_name: Any) -> str:
+    """Use one key for catalog and voice-history item matching."""
+    return " ".join(str(item_name or "").strip().lower().split())
+
+
 # ─── Today's date helper ──────────────────────────────────────────────────────
 
 def _today() -> str:
@@ -73,7 +78,11 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
         except Exception as exc:
             logger.warning("Auto-rollover failed for %s: %s", phone, exc)
 
-    manual_items: Dict[str, Dict[str, Any]] = {r["item_name"]: r for r in manual_rows}
+    manual_items: Dict[str, Dict[str, Any]] = {}
+    for row in manual_rows:
+        name = _normalize_item_name(row.get("item_name"))
+        if name:
+            manual_items[name] = row
 
     # ── Source 2: Voice-detected items from ledger (last 30 days) ────────────
     query: Dict[str, Any] = {
@@ -94,7 +103,7 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
     item_days: Dict[str, set] = defaultdict(set)
 
     for row in ledger_rows:
-        cat = str(row.get("category") or "general").strip().lower()
+        cat = _normalize_item_name(row.get("category") or "general")
         day = str(row.get("created_at", ""))[:10]
         try:
             amt = float(row.get("amount") or 0)
@@ -123,13 +132,13 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
     deleted_names = set()
     for row in inactive_rows:
         if row.get("item_name"):
-            deleted_names.add(str(row["item_name"]).strip().lower())
+            deleted_names.add(_normalize_item_name(row["item_name"]))
         if row.get("item_name_hi"):
-            deleted_names.add(str(row["item_name_hi"]).strip().lower())
+            deleted_names.add(_normalize_item_name(row["item_name_hi"]))
 
     # Only include voice items that have NOT been explicitly deleted by the vendor
     voice_item_names = set(item_days.keys()) - deleted_names
-    all_item_names = voice_item_names | set(manual_items.keys())
+    all_item_names = (voice_item_names | set(manual_items.keys())) - deleted_names
 
     for item_name in sorted(all_item_names):
         if item_name in manual_items:
