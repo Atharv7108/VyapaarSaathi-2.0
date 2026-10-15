@@ -129,6 +129,15 @@ import os
 os.makedirs("static", exist_ok=True)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
+@app.get("/logo.png", include_in_schema=False)
+async def serve_root_logo():
+    for p in ["web/logo.png", "frontend/public/logo.png", "logo-removebg-preview (1).png"]:
+        if os.path.exists(p):
+            return FileResponse(p)
+    raise HTTPException(status_code=404, detail="Logo not found")
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],

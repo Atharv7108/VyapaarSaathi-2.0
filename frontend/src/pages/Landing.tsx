@@ -194,7 +194,7 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-4 sm:px-8 flex items-center justify-between h-16">
           {/* Logo */}
           <a href="#" className="flex items-center gap-2">
-            <img src="/logo.png" alt="VyapaarSathi" className="h-9 w-auto object-contain" />
+            <img src={`${import.meta.env.BASE_URL}logo.png`} alt="VyapaarSathi" className="h-9 w-auto object-contain" />
             <span className="font-extrabold text-lg text-slate-900 tracking-tight">VyapaarSathi</span>
           </a>
 
@@ -579,7 +579,7 @@ export default function Landing() {
       <footer className="bg-slate-900 border-t border-slate-800 py-10 px-6">
         <div className="max-w-6xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2">
-            <img src="/logo.png" alt="VyapaarSathi" className="h-7 w-auto opacity-80" />
+            <img src={`${import.meta.env.BASE_URL}logo.png`} alt="VyapaarSathi" className="h-7 w-auto opacity-80" />
             <span className="text-slate-400 text-sm font-semibold">VyapaarSathi</span>
           </div>
           <p className="text-slate-500 text-xs">{t("Made with ❤️ for India's vendors · © 2026 VyapaarSathi", "भारत के व्यापारियों के लिए ❤️ से बनाया · © 2026 VyapaarSathi")}</p>

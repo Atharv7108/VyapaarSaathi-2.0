@@ -96,7 +96,7 @@ export default function Login() {
       <div className="w-full max-w-md">
         <div className="bg-white rounded-3xl shadow-2xl shadow-black/40 p-8 sm:p-10">
           <div className="flex flex-col items-center mb-8">
-            <img src="/logo.png" alt="VyapaarSathi" className="h-16 w-auto object-contain mb-3" />
+            <img src={`${import.meta.env.BASE_URL}logo.png`} alt="VyapaarSathi" className="h-16 w-auto object-contain mb-3" />
             <h1 className="text-2xl font-black text-slate-900">{step === 1 ? "Welcome Back" : "Enter OTP"}</h1>
             <p className="text-sm text-slate-500 mt-1 text-center">
               {step === 1 

@@ -55,7 +55,7 @@ export default function Layout() {
             className="flex items-center gap-3 px-5 py-4.5 border-b border-slate-100 cursor-pointer group select-none"
           >
             <img
-              src="/logo.png"
+              src={`${import.meta.env.BASE_URL}logo.png`}
               alt="VyapaarSathi Logo"
               className="h-10 w-auto object-contain transition-transform duration-200 group-hover:scale-105"
             />
@@ -140,7 +140,7 @@ export default function Layout() {
       {/* ── Mobile Header (Visible only on mobile) ─────────────────────────── */}
       <header className="md:hidden border-b border-slate-200/80 bg-white sticky top-0 z-30 shadow-xs flex items-center justify-between px-4 py-2.5">
         <div onClick={() => navigate("/app")} className="flex items-center gap-2 cursor-pointer">
-          <img src="/logo.png" alt="Logo" className="h-8 w-auto object-contain" />
+          <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Logo" className="h-8 w-auto object-contain" />
           <span className="text-base font-black text-slate-900">VyapaarSathi</span>
         </div>
         <div className="flex items-center gap-2">
