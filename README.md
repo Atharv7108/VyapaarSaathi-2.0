@@ -139,7 +139,7 @@ are two input formats; the bookkeeping logic after transcription is shared.
 
                          +----------------------+
                          | React + Vite dashboard|
-                         | Vercel or local       |
+                         | Render or local       |
                          +-----------+----------+
                                      |
                                      v
@@ -722,38 +722,148 @@ Mac or developer machine
   └── Cloudflare tunnel for local webhook testing
 ```
 
-### Free production-oriented setup
+### Current production deployment: Render + Docker
+
+The current deployment is a single Docker-based Render web service. The
+frontend is not deployed separately to Vercel. The repository's
+[Dockerfile](Dockerfile) builds the React/Vite frontend first and then places
+the compiled `web/` files inside the Python runtime image. FastAPI serves the
+dashboard and the API from the same Render service.
 
 ```text
-Vercel
-  └── React/Vite frontend
-
-Always-on VM or suitable backend host
-  └── FastAPI + APScheduler + HTTPS reverse proxy
+Render web service
+  └── Docker container
+      ├── React/Vite production dashboard
+      ├── FastAPI REST API
+      ├── Meta WhatsApp webhook
+      └── APScheduler at 09:00 IST
 
 MongoDB provider
   └── Persistent application data
 ```
 
-The backend must remain running for the 09:00 IST scheduler. A sleeping
-server can miss the scheduled job. For an always-running free setup, an
-always-on VM is preferable to a free web host that spins down when idle.
+The file [render.yaml](render.yaml) describes the Render service, Docker
+runtime, health check, and non-secret default environment variables. Render
+provides the public HTTPS URL used for the Meta WhatsApp webhook.
+
+#### How the Docker deployment works
+
+The Dockerfile uses two stages:
+
+1. **Frontend builder:** Node 20 installs the npm dependencies and runs
+   `npm run build`.
+2. **Backend runtime:** Python 3.11 installs the Python requirements and FFmpeg,
+   copies the application, and copies the built frontend into `/app/web`.
+
+The container starts with:
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+```
+
+Render supplies the `PORT` value. The container must listen on `0.0.0.0`, not
+only on `127.0.0.1`, so Render can route public requests to it.
+
+#### Render deployment steps
+
+1. Push the repository to GitHub.
+2. In Render, choose **New → Blueprint** or **New → Web Service**.
+3. Select the GitHub repository `Atharv7108/VyapaarSaathi-2.0`.
+4. If using the blueprint, Render reads [render.yaml](render.yaml). If creating
+   the service manually, choose **Docker** as the runtime.
+5. Set the health check path to:
+
+   ```text
+   /health
+   ```
+
+6. Add the secret environment variables in Render's Environment page:
+
+   ```text
+   MONGODB_URI
+   GROQ_API_KEY
+   WHATSAPP_API_TOKEN
+   WHATSAPP_PHONE_NUMBER_ID
+   WHATSAPP_BUSINESS_ACCOUNT_ID
+   WHATSAPP_WEBHOOK_VERIFY_TOKEN
+   ```
+
+7. Confirm the scheduler values:
+
+   ```text
+   ENABLE_DAILY_AUTOPILOT=true
+   DAILY_AUTOPILOT_HOUR=9
+   DAILY_AUTOPILOT_MINUTE=0
+   ```
+
+8. Deploy and open:
+
+   ```text
+   https://your-service.onrender.com/health
+   ```
+
+9. Confirm the response contains `"status": "ok"` and an empty
+   `missing_env` list.
+10. Configure Meta WhatsApp's callback URL as:
+
+    ```text
+    https://your-service.onrender.com/webhook
+    ```
+
+11. Use the same webhook verification token in Meta and Render.
+12. Check Render logs for:
+
+    ```text
+    Daily Autopilot scheduler enabled (09:00 IST).
+    ```
+
+#### Render free-tier scheduling note
+
+The daily scheduler lives inside the FastAPI process. It can send at 09:00
+only while that process is running. Render free web services can spin down
+after inactivity and may restart. Therefore, the Render free tier is suitable
+for a demo or low-traffic prototype, but it is not an absolute 24-hour uptime
+guarantee. A scheduled request or a paid always-on service is needed for
+stronger delivery reliability.
+
+If Render is asleep at 09:00, the current scheduler does not automatically
+catch up later. The delivery record prevents duplicates after a successful
+send, but a missed run remains missed.
+
+#### Docker commands for local verification
+
+Build the same image used by Render:
+
+```bash
+docker build -t vyapaarsaathi .
+```
+
+Run it with the private environment file:
+
+```bash
+docker run --rm --env-file .env -p 8000:8000 vyapaarsaathi
+```
+
+Check the container:
+
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+The `.dockerignore` file excludes `.env`, virtual environments, tests, and
+build caches from the image context. Never bake secrets into the Dockerfile or
+commit `.env`.
 
 Aiven can provide managed databases and infrastructure services, but it does
 not host this FastAPI process as a free application server. The current code
 uses MongoDB, so moving to an Aiven PostgreSQL service would require a
 database-layer migration.
 
-### Production command
+### Other hosting options
 
-Do not use `--reload` in production:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-Use a process manager such as systemd, Docker, or the hosting platform's
-service manager so the backend restarts after a machine reboot.
+An always-on VM can provide stronger scheduler reliability, but the current
+repository is prepared for Render's Docker deployment. Do not use the local
+`start.sh` script or `uvicorn --reload` as the production process on Render.
 
 ---
 
