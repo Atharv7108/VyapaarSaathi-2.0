@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: vyapaarsaathi
+    env: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB_NAME
+        value: VyapaarSaathi
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_LLM_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_WHISPER_MODEL
+        value: whisper-large-v3-turbo
+      - key: GROQ_WHISPER_LANGUAGE
+        value: auto
+      - key: WHATSAPP_API_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: WHATSAPP_BUSINESS_ACCOUNT_ID
+        sync: false
+      - key: WHATSAPP_WEBHOOK_VERIFY_TOKEN
+        sync: false
+      - key: ENABLE_DAILY_AUTOPILOT
+        value: "true"
+      - key: DAILY_AUTOPILOT_HOUR
+        value: "9"
+      - key: DAILY_AUTOPILOT_MINUTE
+        value: "0"
+      - key: ENABLE_INSTANT_STOCK_ALERTS
+        value: "true"
+      - key: INSTANT_STOCK_ALERT_INTERVAL_SECONDS
+        value: "60"
+      - key: INSTANT_STOCK_ALERT_UNITS_THRESHOLD
+        value: "20"
+      - key: ENABLE_WEEKLY_SUMMARY
+        value: "false"

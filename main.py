@@ -22,7 +22,7 @@ from fastapi import (
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from scheduler import start_scheduler, stop_scheduler
@@ -531,7 +531,10 @@ def _legacy_entry_from_ledger(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 @app.get("/")
-def read_root() -> Dict[str, str]:
+def read_root(request: Request) -> Any:
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept and os.path.exists("web/index.html"):
+        return RedirectResponse(url="/web/")
     return {
         "message": "VyapaarSaathi WhatsApp Ledger API",
         "webhook": "/webhook",
@@ -2455,3 +2458,22 @@ def get_udhari_report_pdf(vendor_phone: str = "web-client") -> Dict[str, Any]:
     except Exception as exc:
         logger.exception("Failed to generate Udhari report PDF: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Web Frontend Static & SPA Serving ──────────────────────────────────────
+if os.path.exists("web"):
+    if os.path.exists("web/assets"):
+        app.mount("/web/assets", StaticFiles(directory="web/assets"), name="web-assets")
+
+    @app.get("/web", include_in_schema=False)
+    @app.get("/web/", include_in_schema=False)
+    async def serve_spa_index():
+        return FileResponse("web/index.html")
+
+    @app.get("/web/{full_path:path}", include_in_schema=False)
+    async def serve_spa_paths(full_path: str):
+        candidate = os.path.join("web", full_path)
+        if os.path.isfile(candidate):
+            return FileResponse(candidate)
+        return FileResponse("web/index.html")
+
