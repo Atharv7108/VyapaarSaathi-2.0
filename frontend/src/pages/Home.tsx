@@ -14,12 +14,17 @@ import {
   Award,
   ChevronRight,
   CheckCircle2,
-  Clock
+  Clock,
+  AlertTriangle,
+  RefreshCw,
 } from "lucide-react";
 
 export default function Home() {
   const navigate = useNavigate();
-  const { entries, loadEntries, vendorId, language, userName, vendorType } = useStore();
+  const {
+    entries, loadEntries, vendorId, language, userName, vendorType,
+    autopilot, autopilotError, loadAutopilot,
+  } = useStore();
   const isHindi = language === "hi";
 
   useEffect(() => {
@@ -27,6 +32,10 @@ export default function Home() {
       loadEntries();
     }
   }, [entries.length, loadEntries, vendorId]);
+
+  useEffect(() => {
+    loadAutopilot();
+  }, [loadAutopilot, vendorId]);
 
   const todayStats = useMemo(() => {
     let earned = 0;
@@ -487,6 +496,76 @@ export default function Home() {
           </div>
         </div>
 
+      </section>
+
+      {/* ── Business Autopilot (secondary website view, placed last) ──────── */}
+      <section className="rounded-3xl border border-orange-200 bg-gradient-to-br from-orange-50 via-white to-amber-50 p-5 sm:p-6 shadow-xs">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-orange-500" />
+              <h2 className="text-lg font-black text-slate-900">
+                {isHindi ? "आज का बिज़नेस प्लान" : "Today's Business Plan"}
+              </h2>
+            </div>
+            <p className="mt-1 text-xs text-slate-600">
+              {isHindi ? "सुबह का WhatsApp प्लान यहां भी देखें।" : "Your morning WhatsApp plan, also available here."}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => loadAutopilot()}
+            className="inline-flex items-center gap-1.5 rounded-full border border-orange-200 bg-white px-3 py-1.5 text-xs font-bold text-orange-700 hover:bg-orange-100 transition"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            {isHindi ? "फिर से जांचें" : "Refresh"}
+          </button>
+        </div>
+
+        {autopilotError ? (
+          <div className="mt-4 flex items-start gap-2 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-xs text-rose-700">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{isHindi ? "आज का प्लान अभी लोड नहीं हो सका।" : "Today's plan could not be loaded right now."}</span>
+          </div>
+        ) : autopilot && autopilot.recommendations.length > 0 ? (
+          <div className="mt-5 grid gap-3 md:grid-cols-2">
+            {autopilot.recommendations.map((recommendation) => {
+              const priorityClass = recommendation.priority === "high"
+                ? "border-rose-200 bg-rose-50/70"
+                : recommendation.priority === "medium"
+                  ? "border-amber-200 bg-amber-50/70"
+                  : "border-slate-200 bg-white/80";
+              return (
+                <div key={recommendation.key} className={`rounded-2xl border p-4 ${priorityClass}`}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-black text-slate-900">{recommendation.title}</p>
+                      <p className="mt-1 text-xs font-semibold leading-relaxed text-slate-700">{recommendation.message}</p>
+                    </div>
+                    <span className="rounded-full bg-white/80 px-2 py-1 text-[10px] font-black uppercase tracking-wide text-slate-600">
+                      {recommendation.priority}
+                    </span>
+                  </div>
+                  <p className="mt-3 text-[11px] leading-relaxed text-slate-600">
+                    <span className="font-bold">{isHindi ? "क्यों: " : "Why: "}</span>{recommendation.reason}
+                  </p>
+                  <Link
+                    to={recommendation.action.href}
+                    className="mt-3 inline-flex items-center gap-1 text-xs font-black text-orange-700 hover:text-orange-900"
+                  >
+                    {isHindi ? "आगे बढ़ें" : recommendation.action.label}
+                    <ArrowUpRight className="h-3.5 w-3.5" />
+                  </Link>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="mt-5 flex items-center gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-800">
+            <CheckCircle2 className="h-5 w-5 shrink-0" />
+            <span>{isHindi ? "अभी कोई जरूरी कार्रवाई नहीं है।" : "No urgent action right now."}</span>
+          </div>
+        )}
       </section>
 
     </div>

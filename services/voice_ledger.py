@@ -163,6 +163,7 @@ class ExtractedEntry(BaseModel):
         "PRICE_UPDATE",
         "GET_REPORT",
         "GET_INVENTORY",
+        "DELETE_ITEM",
         "UDHARI_ADD",
         "UDHARI_PAYMENT",
         "UDHARI_QUERY",
@@ -202,9 +203,10 @@ class ExtractedEntry(BaseModel):
         elif self.intent == "PRICE_UPDATE":
             if self.price_per_unit is None or self.price_per_unit <= 0:
                 raise ValueError("PRICE_UPDATE requires price_per_unit > 0")
-        elif self.intent in {"GET_REPORT", "GET_INVENTORY", "UDHARI_REPORT"}:
+        elif self.intent in {"GET_REPORT", "GET_INVENTORY", "DELETE_ITEM", "UDHARI_REPORT"}:
             # No extra validation needed — just a request
-            pass
+            if self.intent == "DELETE_ITEM" and not (self.category or "").strip():
+                raise ValueError("DELETE_ITEM requires an item category")
         elif self.intent == "UDHARI_QUERY":
             if not self.customer_name or not self.customer_name.strip():
                 self.intent = "UDHARI_REPORT"
@@ -481,6 +483,13 @@ def extract_json(transcript: str) -> Optional[List[Dict[str, Any]]]:
         "Use ONLY when vendor mentions a NEW rate/price, NOT a sale.\n"
         "Keys: intent, category, price_per_unit. (No amount, no type.)\n"
         "Examples: 'chai ka rate 12 rupay', 'samosa ab 20 ka'\n\n"
+
+        "=== intent: DELETE_ITEM (vendor removes one item from inventory) ===\n"
+        "Use ONLY when the vendor explicitly asks to delete/remove an item from stock or catalog.\n"
+        "Keys: intent:'DELETE_ITEM', category:'<exact item name>'.\n"
+        "Never use this for selling, stock becoming zero, or deleting the whole inventory.\n"
+        "Examples: 'chai ko inventory se delete karo', 'samosa stock hata do', "
+        "'remove biscuit from my inventory'.\n\n"
 
         "=== intent: GET_REPORT (vendor asks for their record/report) ===\n"
         "Use when vendor asks for their report, record, hisaab, statement.\n"
@@ -1545,31 +1554,15 @@ def _recover_explicit_udhari_actions(text: str) -> List[Dict[str, Any]]:
     return recovered
 
 
-def process_voice_message(phone: str, media_id: str) -> str:
+def process_transcript_message(phone: str, transcript: str, media_id: str = "") -> str:
+    """Process a transcript from either WhatsApp voice or text input."""
     from services.conversation_engine import (
         analyze_voice_input, process_follow_up_answer, has_pending, get_pending,
     )
     from services.inventory import get_inventory
     catalog_phone = phone
 
-    started_at = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="vyapaarsaathi-wa-") as tmp_dir:
-        working_dir = Path(tmp_dir)
-        raw_audio = download_audio(media_id, working_dir)
-        # Preserve the source codec on the fast path. Conversion is retained
-        # as a compatibility fallback for formats rejected by the API.
-        transcript_payload = transcribe_audio(raw_audio, allow_local_fallback=False)
-        if not transcript_payload.get("text", "").strip():
-            logger.info("Direct audio transcription was empty; retrying normalized audio")
-            mp3_audio = convert_audio(raw_audio, working_dir)
-            transcript_payload = transcribe_audio(mp3_audio)
-
-    transcript = transcript_payload.get("text", "").strip()
-    logger.info(
-        "Voice timing phone=%s transcription_pipeline=%.0fms",
-        phone,
-        (time.monotonic() - started_at) * 1000,
-    )
+    transcript = transcript.strip()
     if not transcript:
         return FALLBACK_RESPONSE
 
@@ -1955,6 +1948,29 @@ def process_voice_message(phone: str, media_id: str) -> str:
     return "\n".join(command_replies + [reply]) if command_replies else reply
 
 
+def process_voice_message(phone: str, media_id: str) -> str:
+    """Download, transcribe, and process a WhatsApp voice message."""
+    started_at = time.monotonic()
+    with tempfile.TemporaryDirectory(prefix="vyapaarsaathi-wa-") as tmp_dir:
+        working_dir = Path(tmp_dir)
+        raw_audio = download_audio(media_id, working_dir)
+        # Preserve the source codec on the fast path. Conversion is retained
+        # as a compatibility fallback for formats rejected by the API.
+        transcript_payload = transcribe_audio(raw_audio, allow_local_fallback=False)
+        if not transcript_payload.get("text", "").strip():
+            logger.info("Direct audio transcription was empty; retrying normalized audio")
+            mp3_audio = convert_audio(raw_audio, working_dir)
+            transcript_payload = transcribe_audio(mp3_audio)
+
+    transcript = transcript_payload.get("text", "").strip()
+    logger.info(
+        "Voice timing phone=%s transcription_pipeline=%.0fms",
+        phone,
+        (time.monotonic() - started_at) * 1000,
+    )
+    return process_transcript_message(phone, transcript, media_id=media_id)
+
+
 def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, catalog_phone: str = "") -> str:
     """Save entries and build WhatsApp reply text."""
     if not catalog_phone:
@@ -2009,6 +2025,25 @@ def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, c
         if intent in ("GET_REPORT", "GET_INVENTORY"):
             continue
 
+        if intent == "DELETE_ITEM":
+            cat = str(entry_data.get("category") or "").strip().lower()
+            if not cat:
+                parts.append("⚠️ Item ka naam batayein jise inventory se delete karna hai.")
+                continue
+            try:
+                from services.inventory import delete_inventory_item
+                deleted = delete_inventory_item(phone=catalog_phone, item_name=cat)
+                parts.append(
+                    f"🗑️ {cat} inventory se delete kar diya gaya."
+                    if deleted
+                    else f"⚠️ {cat} inventory mein nahi mila."
+                )
+                invalidate_inventory_cache(catalog_phone)
+            except Exception as inv_exc:
+                logger.exception("DELETE_ITEM failed '%s': %s", cat, inv_exc)
+                parts.append("⚠️ Inventory item delete nahi ho saka. Kripya dobara try kijiye.")
+            continue
+
         # ADD_ENTRY — save under real phone and use vendor's catalog
         try:
             saved = save_to_db(phone=phone, extracted_data=entry_data, audio_url=media_url, catalog_phone=catalog_phone)
@@ -2059,7 +2094,17 @@ def _save_and_reply_silent(phone: str, entries: List[Dict[str, Any]], media_url:
     alert_lines: List[str] = []
     for entry_data in entries:
         intent = str(entry_data.get("intent") or "ADD_ENTRY").upper()
-        if intent in ("STOCK_UPDATE", "PRICE_UPDATE", "GET_REPORT", "GET_INVENTORY"):
+        if intent in ("STOCK_UPDATE", "PRICE_UPDATE", "DELETE_ITEM", "GET_REPORT", "GET_INVENTORY"):
+            continue
+        if intent == "DELETE_ITEM":
+            cat = str(entry_data.get("category") or "").strip().lower()
+            if cat:
+                try:
+                    from services.inventory import delete_inventory_item
+                    delete_inventory_item(phone=catalog_phone, item_name=cat)
+                    invalidate_inventory_cache(catalog_phone)
+                except Exception:
+                    logger.exception("Silent DELETE_ITEM failed '%s'", cat)
             continue
         try:
             saved = save_to_db(phone=phone, extracted_data=entry_data, audio_url=media_url, catalog_phone=catalog_phone)
@@ -2175,6 +2220,7 @@ __all__ = [
     "save_to_db",
     "send_whatsapp_reply",
     "is_audio_message",
+    "process_transcript_message",
     "process_voice_message",
     "run_instant_stock_alert_job",
     "run_weekly_summary_job",

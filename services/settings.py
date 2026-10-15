@@ -31,6 +31,9 @@ class Settings:
     enable_weekly_summary: bool
     enable_weekly_summary_tts: bool
     enable_instant_stock_alerts: bool
+    enable_daily_autopilot: bool
+    daily_autopilot_hour: int
+    daily_autopilot_minute: int
     instant_stock_alert_interval_seconds: int
     instant_stock_alert_units_threshold: int
     instant_stock_alert_recipients: str
@@ -71,6 +74,9 @@ def get_settings() -> Settings:
         enable_weekly_summary=_to_bool(os.getenv("ENABLE_WEEKLY_SUMMARY"), default=False),
         enable_weekly_summary_tts=_to_bool(os.getenv("ENABLE_WEEKLY_SUMMARY_TTS"), default=False),
         enable_instant_stock_alerts=_to_bool(os.getenv("ENABLE_INSTANT_STOCK_ALERTS"), default=True),
+        enable_daily_autopilot=_to_bool(os.getenv("ENABLE_DAILY_AUTOPILOT"), default=True),
+        daily_autopilot_hour=min(23, max(0, int(os.getenv("DAILY_AUTOPILOT_HOUR", "9") or "9"))),
+        daily_autopilot_minute=min(59, max(0, int(os.getenv("DAILY_AUTOPILOT_MINUTE", "0") or "0"))),
         instant_stock_alert_interval_seconds=max(
             30,
             int(os.getenv("INSTANT_STOCK_ALERT_INTERVAL_SECONDS", "60") or "60"),

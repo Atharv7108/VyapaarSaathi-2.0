@@ -82,18 +82,20 @@ export default function Onboarding() {
             
             <div className={`rounded-3xl border p-5 ${bgCard}`}>
               <div className="grid gap-4">
-                <button 
-                  onClick={() => { setLanguage("hi"); setStep(2); }}
-                  className={`flex w-full items-center justify-center rounded-2xl p-4 text-lg font-bold transition-all ${isHindi ? tBtnActive : tBtn}`}
-                >
-                  हिंदी
-                </button>
-                <button 
-                  onClick={() => { setLanguage("en"); setStep(2); }}
-                  className={`flex w-full items-center justify-center rounded-2xl p-4 text-lg font-bold transition-all ${!isHindi ? tBtnActive : tBtn}`}
-                >
-                  English
-                </button>
+                {[
+                  { value: "hi" as const, label: "हिंदी" },
+                  { value: "en" as const, label: "English" },
+                  { value: "mr" as const, label: "मराठी" },
+                  { value: "hinglish" as const, label: "Hinglish" },
+                ].map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => { setLanguage(option.value); setStep(2); }}
+                    className={`flex w-full items-center justify-center rounded-2xl p-4 text-lg font-bold transition-all ${language === option.value ? tBtnActive : tBtn}`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
               </div>
             </div>
             <p className={`mt-6 text-center text-xs ${textMuted}`}>

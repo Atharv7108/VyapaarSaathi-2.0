@@ -42,10 +42,12 @@ from services.voice_ledger import (
     normalize_spoken_numbers,
     save_to_db,
     transcribe_audio,
+    process_transcript_message,
 )
 from db_config import get_db
 from services.stock_suggestions import aggregate_item_stats, call_groq_for_suggestions
 from services.ai_insights import run_insights_pipeline
+from services.autopilot import build_autopilot_plan, preview_daily_autopilot, run_daily_autopilot_job
 from services.conversation_engine import analyze_voice_input, process_follow_up_answer, has_pending, cancel_pending
 from services.vendor_manager import (
     get_or_create_vendor,
@@ -454,8 +456,14 @@ def _handle_text_message(sender: str, text: str) -> None:
     except Exception as rep_err:
         logger.warning("Text report handler error: %s", rep_err)
 
-    # Active vendor — text messages not supported for daily sales entries
-    _send_safe_reply(sender, VOICE_PROMPT_MESSAGE)
+    # Active vendor text uses the same extraction, inventory, ledger, and
+    # conversation pipeline as voice. This keeps both input modes consistent.
+    try:
+        reply_body = process_transcript_message(sender, normalize_spoken_numbers(text))
+    except Exception:
+        logger.exception("Text message pipeline failed for %s", sender)
+        reply_body = FALLBACK_RESPONSE
+    _send_safe_reply(sender, reply_body)
 
 
 def _is_phone_identifier(value: str) -> bool:
@@ -847,6 +855,11 @@ class AdminBroadcastRequest(BaseModel):
     media_id: Optional[str] = None
     media_type: Optional[str] = None  # "image" or "document"
     filename: Optional[str] = None
+
+
+class AdminAutopilotBroadcastRequest(BaseModel):
+    target: str = "active"
+    custom_phone: Optional[str] = None
 
 
 @app.get("/admin/stats")
@@ -1902,6 +1915,94 @@ def get_insights(vendor_id: str = "", refresh: bool = False) -> Dict[str, Any]:
     except Exception as exc:
         logger.exception("/insights failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"Insights failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Business Autopilot endpoint
+# ---------------------------------------------------------------------------
+@app.get("/autopilot")
+def get_autopilot(vendor_id: str = "", phone: str = "") -> Dict[str, Any]:
+    """Return a vendor-scoped, explainable daily action plan."""
+    raw = phone.strip() or vendor_id.strip()
+    from services.vendor_manager import _normalize_phone
+
+    if not raw or _is_uuid(raw):
+        phone_key = "web-client"
+    elif _is_phone_identifier(raw):
+        phone_key = _normalize_phone(raw)
+    else:
+        phone_key = raw
+
+    try:
+        return build_autopilot_plan(phone_key)
+    except Exception as exc:
+        logger.exception("/autopilot failed for %s: %s", phone_key, exc)
+        raise HTTPException(status_code=500, detail=f"Autopilot failed: {exc}")
+
+
+@app.get("/autopilot/preview")
+def get_autopilot_preview(vendor_id: str = "", phone: str = "") -> Dict[str, str]:
+    """Preview the exact WhatsApp text without sending it."""
+    raw = phone.strip() or vendor_id.strip()
+    from services.vendor_manager import _normalize_phone
+
+    if not raw or _is_uuid(raw):
+        phone_key = "web-client"
+    elif _is_phone_identifier(raw):
+        phone_key = _normalize_phone(raw)
+    else:
+        phone_key = raw
+    try:
+        return {"phone": phone_key, "message": preview_daily_autopilot(phone_key)}
+    except Exception as exc:
+        logger.exception("/autopilot/preview failed for %s: %s", phone_key, exc)
+        raise HTTPException(status_code=500, detail=f"Autopilot preview failed: {exc}")
+
+
+@app.post("/admin/autopilot/send-now")
+def send_autopilot_now(admin_user: Dict[str, Any] = Depends(get_current_admin)) -> Dict[str, Any]:
+    """Send today's briefing and expose per-vendor delivery failures to admins."""
+    return run_daily_autopilot_job()
+
+
+@app.post("/admin/autopilot/broadcast")
+def broadcast_autopilot_plan(
+    data: AdminAutopilotBroadcastRequest,
+    admin_user: Dict[str, Any] = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Send the same generated plan as the morning job to a selected audience."""
+    from services.vendor_manager import _normalize_phone
+
+    db = get_db()
+    if data.target == "custom":
+        if not data.custom_phone:
+            raise HTTPException(status_code=400, detail="custom_phone is required")
+        phones = [_normalize_phone(data.custom_phone)]
+    elif data.target == "all":
+        phones = [
+            str(row.get("phone") or "").strip()
+            for row in db["vendors"].find({}, {"_id": 0, "phone": 1})
+        ]
+    else:
+        phones = [
+            str(row.get("phone") or "").strip()
+            for row in db["vendors"].find(
+                {"state": "active", "active": {"$ne": False}},
+                {"_id": 0, "phone": 1},
+            )
+        ]
+
+    report = run_daily_autopilot_job(phones=phones, allow_resend=True)
+    return {
+        "status": "completed",
+        "target": data.target,
+        "mode": "autopilot",
+        "total_targets": len(phones),
+        "sent": report["sent_count"],
+        "failed": report["failed_count"],
+        "sent_recipients": report["sent_recipients"],
+        "failed_recipients": report["failed_recipients"],
+    }
 
 
 # ---------------------------------------------------------------------------

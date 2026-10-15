@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { useStore } from "../store/useStore";
+import { useStore, type Language } from "../store/useStore";
 
-type Lang = "en" | "hi" | "mr" | "hinglish";
+type Lang = Language;
 
 const MARATHI: Record<string, string> = {
   "Features": "वैशिष्ट्ये", "How it Works": "हे कसे काम करते", "Demo": "डेमो", "About": "आमच्याबद्दल", "Help": "मदत", "Language": "भाषा",
@@ -135,8 +135,7 @@ const FAQS = [
 
 export default function Landing() {
   const navigate = useNavigate();
-  const { isLoggedIn, userRole } = useStore();
-  const [lang, setLang] = useState<Lang>("en");
+  const { isLoggedIn, userRole, language: lang, setLanguage: setLang } = useStore();
   const [msgIdx, setMsgIdx] = useState(0);
   const [faqOpen, setFaqOpen] = useState<number | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);

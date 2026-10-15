@@ -35,6 +35,7 @@ import {
   FileText,
   Upload,
   Paperclip,
+  Sparkles,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -368,7 +369,7 @@ export default function AdminDashboard() {
 
   // Broadcast state
   const [broadcastTarget, setBroadcastTarget] = useState<string>("all");
-  const [broadcastMode, setBroadcastMode] = useState<"text" | "image" | "document" | "template">("text");
+  const [broadcastMode, setBroadcastMode] = useState<"text" | "image" | "document" | "template" | "autopilot">("text");
   const [mediaSource, setMediaSource] = useState<"file" | "url">("file");
   const [broadcastCustomPhone, setBroadcastCustomPhone] = useState("");
   const [broadcastMessage, setBroadcastMessage] = useState("");
@@ -670,15 +671,16 @@ export default function AdminDashboard() {
     setBroadcasting(true);
     setBroadcastResult(null);
     try {
-      const res = await fetch("/admin/broadcast", {
+      const isAutopilot = broadcastMode === "autopilot";
+      const res = await fetch(isAutopilot ? "/admin/autopilot/broadcast" : "/admin/broadcast", {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({
           target: broadcastTarget,
           custom_phone: broadcastTarget === "custom" ? broadcastCustomPhone.trim() : undefined,
-          mode: broadcastMode,
+          mode: isAutopilot ? undefined : broadcastMode,
           template_name: "hello_world",
-          message: broadcastMessage.trim(),
+          message: isAutopilot ? undefined : broadcastMessage.trim(),
           media_url: (broadcastMode === "image" || broadcastMode === "document") ? broadcastMediaUrl.trim() : undefined,
           media_id: (broadcastMode === "image" || broadcastMode === "document") && broadcastMediaId ? broadcastMediaId : undefined,
           media_type: broadcastMode === "image" ? "image" : broadcastMode === "document" ? "document" : undefined,
@@ -2015,6 +2017,7 @@ export default function AdminDashboard() {
                 </label>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 8 }}>
                   {[
+                    { id: "autopilot", label: "Morning Plan", desc: "Same plan as 09:00 alert", icon: Sparkles },
                     { id: "text",     label: "Text Only",       desc: "Free-form message",   icon: MessageSquare },
                     { id: "image",    label: "Photo / Image",   desc: "PNG, JPG with caption",icon: ImageIcon },
                     { id: "document", label: "PDF Document",    desc: "PDF file with caption",icon: FileText },
@@ -2336,7 +2339,11 @@ export default function AdminDashboard() {
                 )}
 
                 {/* Message Body or Caption */}
-                {broadcastMode !== "template" ? (
+                {broadcastMode === "autopilot" ? (
+                  <div style={{ padding: 12, borderRadius: 6, background: "rgba(249,115,22,0.06)", border: "1px solid rgba(249,115,22,0.25)", color: "#E6E8EB", fontSize: 12, lineHeight: 1.5 }}>
+                    This sends each vendor&apos;s generated morning Business Plan using the same data and message format as the automatic 09:00 IST delivery.
+                  </div>
+                ) : broadcastMode !== "template" ? (
                   <div>
                     <label style={{ fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "#8B93A0", display: "block", marginBottom: 6 }}>
                       {broadcastMode === "image" || broadcastMode === "document" ? "Caption / Accompanying Text" : "Message Body"}

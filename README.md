@@ -5,6 +5,31 @@
 
 VyapaarSaathi is an AI-powered voice ledger built for India's 63 million street vendors and micro-entrepreneurs who cannot type, don't have time to maintain spreadsheets, and conduct business entirely in Hindi, Marathi, or Hinglish. Just send a WhatsApp voice note or tap a mic button — the system understands, records, and analyzes everything.
 
+### Business Autopilot
+
+The vendor dashboard includes a deterministic, vendor-scoped daily action plan. The
+Autopilot combines the last 14 days of ledger activity, today's inventory, and
+outstanding udhari to suggest up to five prioritized next actions. Each action
+includes its supporting reason and links to the relevant dashboard workflow.
+Autopilot is read-only: it never sends a customer reminder or places a supplier
+order without an explicit user action.
+
+The API is available at:
+
+```text
+GET /autopilot?vendor_id=<phone-or-web-vendor-id>
+```
+
+Active WhatsApp vendors also receive the briefing automatically every morning
+at 09:00 IST by default. Delivery is recorded per vendor and date so scheduler
+restarts do not resend the same briefing. Configure the time with
+`DAILY_AUTOPILOT_HOUR` and `DAILY_AUTOPILOT_MINUTE`, or disable it with
+`ENABLE_DAILY_AUTOPILOT=false`.
+Use `GET /autopilot/preview?phone=...` to see the exact WhatsApp message
+without sending it. An authenticated admin can use
+`POST /admin/autopilot/send-now` to send today's message immediately to all
+eligible vendors; delivery remains idempotent for each vendor and date.
+
 
 ---
 

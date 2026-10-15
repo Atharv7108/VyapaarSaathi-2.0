@@ -1,4 +1,4 @@
-import { useStore } from "../store/useStore";
+import { useStore, type Language } from "../store/useStore";
 import { User, Globe, Download, Activity, CheckCircle2, Shield, Phone, Store } from "lucide-react";
 
 export default function Profile() {
@@ -7,6 +7,12 @@ export default function Profile() {
     language, setLanguage, entries, userName, vendorType, downloadReport
   } = useStore();
   const isHindi = language === "hi";
+  const languageOptions: { value: Language; label: string }[] = [
+    { value: "en", label: "English" },
+    { value: "hi", label: "हिंदी" },
+    { value: "mr", label: "मराठी" },
+    { value: "hinglish", label: "Hinglish" },
+  ];
 
   return (
     <div className="flex flex-col gap-6 max-w-4xl mx-auto w-full">
@@ -100,12 +106,14 @@ export default function Profile() {
                 <p className="text-xs text-slate-500">{isHindi ? "वर्तमान: हिंदी (Hindi)" : "Current: English"}</p>
               </div>
             </div>
-            <button
-              onClick={() => setLanguage(isHindi ? "en" : "hi")}
-              className="px-4 py-2 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-black text-slate-800 transition"
+            <select
+              value={language}
+              onChange={(event) => setLanguage(event.target.value as Language)}
+              className="px-3 py-2 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-black text-slate-800 outline-none cursor-pointer transition"
+              aria-label={isHindi ? "भाषा बदलें" : "Change language"}
             >
-              {isHindi ? "Switch to English" : "हिंदी में बदलें"}
-            </button>
+              {languageOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
           </div>
 
           {/* Data Export */}

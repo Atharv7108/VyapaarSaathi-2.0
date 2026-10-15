@@ -81,3 +81,31 @@ def test_entries_compatibility_endpoint(monkeypatch):
     assert len(payload["entries"]) == 2
     assert payload["entries"][0]["total_earned"] == 500.0
     assert payload["entries"][1]["total_spent"] == 200.0
+
+
+def test_autopilot_endpoint_normalizes_vendor_phone(monkeypatch):
+    _configure_env(monkeypatch)
+    client = TestClient(main_module.app)
+    captured = {}
+
+    def fake_plan(phone):
+        captured["phone"] = phone
+        return {
+            "generated_at": "2026-10-15T00:00:00+00:00",
+            "date": "2026-10-15",
+            "summary": {
+                "active_days": 1,
+                "income_14d": 1000,
+                "expenses_14d": 0,
+                "average_daily_income": 1000,
+                "average_daily_net": 1000,
+            },
+            "recommendations": [],
+        }
+
+    monkeypatch.setattr(main_module, "build_autopilot_plan", fake_plan)
+    response = client.get("/autopilot?vendor_id=+919999999999")
+
+    assert response.status_code == 200
+    assert captured["phone"] == "whatsapp:+919999999999"
+    assert response.json()["summary"]["active_days"] == 1

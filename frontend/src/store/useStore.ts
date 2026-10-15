@@ -4,6 +4,7 @@ type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string
 type JsonObject = { [key: string]: JsonValue };
 export type ThemeMode = "day" | "night";
 export type UserRole = "vendor" | "admin";
+export type Language = "en" | "hi" | "mr" | "hinglish";
 
 export type SummaryData = {
   transcript: string;
@@ -69,6 +70,29 @@ export type AIInsightsData = {
   audio_en_base64: string | null;
 };
 
+export type AutopilotRecommendation = {
+  key: string;
+  priority: "high" | "medium" | "low";
+  title: string;
+  message: string;
+  reason: string;
+  action: { label: string; href: string };
+  data: JsonObject;
+};
+
+export type AutopilotPlan = {
+  generated_at: string;
+  date: string;
+  summary: {
+    active_days: number;
+    income_14d: number;
+    expenses_14d: number;
+    average_daily_income: number;
+    average_daily_net: number;
+  };
+  recommendations: AutopilotRecommendation[];
+};
+
 const DEFAULT_VENDOR_ID = "123e4567-e89b-12d3-a456-426614174000";
 const MODE_STORAGE_KEY = "vyapaarsaathi-theme-mode";
 const AUTH_ROLE_KEY = "vyapaarsaathi-role";
@@ -118,9 +142,12 @@ function getInitialOnboarded(): boolean {
   return window.localStorage.getItem("vyapaarsaathi-onboarded") === "true";
 }
 
-function getInitialLanguage(): "en" | "hi" {
+function getInitialLanguage(): Language {
   if (typeof window === "undefined") return "en";
-  return window.localStorage.getItem("vyapaarsaathi-language") === "hi" ? "hi" : "en";
+  const stored = window.localStorage.getItem("vyapaarsaathi-language");
+  return stored === "en" || stored === "hi" || stored === "mr" || stored === "hinglish"
+    ? stored
+    : "en";
 }
 
 function getInitialString(key: string, defaultVal: string = ""): string {
@@ -245,8 +272,8 @@ interface AppState {
 
   hasOnboarded: boolean;
   setHasOnboarded: (val: boolean) => void;
-  language: "en" | "hi";
-  setLanguage: (val: "en" | "hi") => void;
+  language: Language;
+  setLanguage: (val: Language) => void;
   vendorType: string;
   setVendorType: (val: string) => void;
   userName: string;
@@ -284,6 +311,9 @@ interface AppState {
   aiInsights: AIInsightsData | null;
   aiInsightsPhase: string;
   runAIInsights: () => Promise<void>;
+  autopilot: AutopilotPlan | null;
+  autopilotError: string;
+  loadAutopilot: () => Promise<void>;
 }
 
 let recorderInstance: MediaRecorder | null = null;
@@ -369,6 +399,8 @@ export const useStore = create<AppState>((set, get) => ({
   inventory: [],
   aiInsights: null,
   aiInsightsPhase: "",
+  autopilot: null,
+  autopilotError: "",
   pendingEntry: null,
   counterQuestion: null,
   counterAudioHi: null,
@@ -460,6 +492,31 @@ export const useStore = create<AppState>((set, get) => ({
       setOutput({ error: String(error) });
     } finally {
       setLoading("suggestions", false);
+    }
+  },
+
+  loadAutopilot: async () => {
+    const { vendorId } = get();
+    try {
+      const data = await fetchJson(`/autopilot?vendor_id=${encodeURIComponent(vendorId)}`);
+      const recommendations = Array.isArray(data.recommendations)
+        ? data.recommendations as AutopilotRecommendation[]
+        : [];
+      const summary = data.summary;
+      if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+        throw new Error("Autopilot response did not include a valid summary.");
+      }
+      set({
+        autopilot: {
+          generated_at: typeof data.generated_at === "string" ? data.generated_at : "",
+          date: typeof data.date === "string" ? data.date : "",
+          summary: summary as AutopilotPlan["summary"],
+          recommendations,
+        },
+        autopilotError: "",
+      });
+    } catch (error) {
+      set({ autopilot: null, autopilotError: String(error) });
     }
   },
 

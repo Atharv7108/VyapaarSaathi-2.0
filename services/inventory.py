@@ -276,11 +276,15 @@ def delete_inventory_item(phone: str, item_name: str) -> bool:
     """Soft-delete an inventory item (marks is_active=False for all dates)."""
     db = get_db()
     phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
-    db[TABLE].update_many(
-        {"phone": {"$in": phone_variants}, "item_name": item_name.lower().strip()},
+    result = db[TABLE].update_many(
+        {
+            "phone": {"$in": phone_variants},
+            "item_name": item_name.lower().strip(),
+            "is_active": {"$ne": False},
+        },
         {"$set": {"is_active": False}}
     )
-    return True
+    return bool(result.modified_count or result.matched_count)
 
 
 def reset_daily_stock(phone: str) -> int:

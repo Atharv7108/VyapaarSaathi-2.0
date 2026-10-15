@@ -9,6 +9,7 @@ import pytz
 
 from services.settings import get_settings
 from services.voice_ledger import run_instant_stock_alert_job, run_weekly_summary_job
+from services.autopilot import run_daily_autopilot_job
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler(timezone=pytz.timezone("Asia/Kolkata"))
@@ -18,6 +19,28 @@ def start_scheduler() -> None:
     """Registers optional scheduler jobs (weekly summary + instant stock alerts)."""
     settings = get_settings()
     jobs_added = False
+
+    if settings.enable_daily_autopilot:
+        scheduler.add_job(
+            _run_daily_autopilot_with_logging,
+            CronTrigger(
+                hour=settings.daily_autopilot_hour,
+                minute=settings.daily_autopilot_minute,
+                timezone=pytz.timezone("Asia/Kolkata"),
+            ),
+            id="daily_autopilot",
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+        )
+        jobs_added = True
+        logger.info(
+            "Daily Autopilot scheduler enabled (%02d:%02d IST).",
+            settings.daily_autopilot_hour,
+            settings.daily_autopilot_minute,
+        )
+    else:
+        logger.info("Daily Autopilot scheduler disabled by environment flag.")
 
     if settings.enable_weekly_summary:
         scheduler.add_job(
@@ -60,3 +83,13 @@ def stop_scheduler() -> None:
     """Shuts down the background scheduler if running."""
     if scheduler.running:
         scheduler.shutdown()
+
+
+def _run_daily_autopilot_with_logging() -> None:
+    report = run_daily_autopilot_job()
+    logger.info(
+        "Daily Autopilot delivery complete: sent=%d skipped=%d failed=%d.",
+        report["sent_count"],
+        report["skipped_count"],
+        report["failed_count"],
+    )
