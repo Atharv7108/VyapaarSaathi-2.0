@@ -291,6 +291,11 @@ def process_follow_up_answer(
         # No pending conversation — treat as a fresh recording
         return analyze_voice_input(answer_extracted, phone, inventory_items)
 
+    # If the user switched to an explicit command (delete item, view inventory, report, udhari), abort pending flow
+    if any(str(e.get("intent") or "").upper() in ("DELETE_ITEM", "GET_INVENTORY", "GET_REPORT", "UDHARI_ADD", "UDHARI_PAYMENT", "UDHARI_QUERY", "UDHARI_REPORT") for e in (answer_extracted or [])):
+        _clear_pending(phone)
+        return analyze_voice_input(answer_extracted, phone, inventory_items)
+
     pending_reason = pending["status"]
     original_entry = pending["entry_data"]
     already_saved = pending.get("complete_entries", [])

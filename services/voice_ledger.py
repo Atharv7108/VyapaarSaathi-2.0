@@ -1485,9 +1485,68 @@ def _looks_like_inventory_request(transcript: str) -> bool:
         "स्टॉक बढ़ाओ",
     )
 
+    delete_markers = (
+        "delete",
+        "delet",
+        "hata",
+        "hatao",
+        "hata do",
+        "hata dena",
+        "remove",
+        "nikaal",
+        "nikal",
+        # Devanagari
+        "डिलीट",
+        "हटाओ",
+        "हटा",
+        "निकाल",
+    )
+    if any(marker in text for marker in delete_markers):
+        return False
+
     has_request = any(marker in text for marker in request_markers)
     has_update_or_transaction = any(marker in text for marker in update_or_transaction_markers)
     return has_request and not has_update_or_transaction
+
+
+_DELETE_PATTERNS = [
+    # 1. "inventory/stock se <item> (ko) delete/hatao/remove karo"
+    re.compile(r"^(?:meri\s+|mere\s+)?(?:inventory|stock|catalogue|catalog)\s+se\s+(.+?)(?:\s+ko)?\s+(?:delete|delet|hatao|hata\s*do|hata\s*dena|hata|remove|nikaal\s*do|nikal\s*do)(?:\s+karo|\s+kar\s*do|\s+kijiye|\s+karna)?$", re.I),
+
+    # 2. "<item> (ko) inventory/stock se delete/hatao/remove karo"
+    re.compile(r"^(.+?)(?:\s+ko)?\s+(?:inventory|stock|catalogue|catalog)\s+se\s+(?:delete|delet|hatao|hata\s*do|hata\s*dena|hata|remove|nikaal\s*do|nikal\s*do)(?:\s+karo|\s+kar\s*do|\s+kijiye|\s+karna)?$", re.I),
+
+    # 3. "<item> (ko) (stock/item)? delete/delet/hatao/remove karo/kar do"
+    re.compile(r"^(.+?)(?:\s+ko)?(?:\s+(?:stock|item))?\s+(?:delete|delet|hatao|hata\s*do|hata\s*dena|remove|nikaal\s*do|nikal\s*do)(?:\s+karo|\s+kar\s*do|\s+kijiye|\s+karna|\s+karein)?$", re.I),
+
+    # 4. "<item> (ko) delete/delet/remove"
+    re.compile(r"^(.+?)(?:\s+ko)?\s+(?:delete|delet|remove)$", re.I),
+
+    # 5. "delete/remove/hatao <item> (from inventory/stock)?"
+    re.compile(r"^(?:delete|delet|remove|hatao|hata\s*do|nikaal\s*do)\s+(?:item\s+)?(.+?)(?:\s+from\s+(?:inventory|stock))?(?:\s+karo|\s+kar\s*do)?$", re.I),
+
+    # 6. Devanagari patterns
+    re.compile(r"^(?:इन्वेंटरी|स्टॉक)\s+से\s+(.+?)(?:\s+को)?\s+(?:डिलीट|हटाओ|हटा\s*दो|निकाल\s*दो)(?:\s+करो|\s+कर\s*दो)?$"),
+    re.compile(r"^(.+?)(?:\s+को)?\s+(?:इन्वेंटरी|स्टॉक)\s+से\s+(?:डिलीट|हटाओ|हटा\s*दो|निकाल\s*दो)(?:\s+करो|\s+कर\s*दो)?$"),
+    re.compile(r"^(.+?)(?:\s+को)?(?:\s+स्टॉक)?\s+(?:डिलीट|हटाओ|हटा\s*दो|निकाल\s*दो)(?:\s+करो|\s+कर\s*दो)?$"),
+    re.compile(r"^(?:डिलीट|हटाओ|हटा\s*दो|निकाल\s*दो)\s+(.+?)(?:\s+करो|\s+कर\s*दो)?$"),
+]
+
+
+def match_delete_item(text: str) -> Optional[str]:
+    """Deterministically extract the item name if text is an item deletion command."""
+    cleaned = " ".join((text or "").strip().lower().split())
+    cleaned = re.sub(r"[?!.,]", "", cleaned)
+    if not cleaned:
+        return None
+    for pat in _DELETE_PATTERNS:
+        m = pat.match(cleaned)
+        if m:
+            item = m.group(1).strip()
+            item = re.sub(r"^(?:item|ko)\s+|\s+(?:item|ko)$", "", item).strip()
+            if item and len(item) >= 2 and item not in ("sab", "all", "sabkuch"):
+                return item
+    return None
 
 
 def _looks_like_pnl_report_request(text: str) -> bool:
@@ -1567,6 +1626,21 @@ def process_transcript_message(phone: str, transcript: str, media_id: str = "") 
         return FALLBACK_RESPONSE
 
     intent_transcript = normalize_spoken_numbers(transcript)
+
+    # Fast path: handle inventory item delete commands deterministically.
+    del_target = match_delete_item(intent_transcript)
+    if del_target:
+        try:
+            from services.inventory import delete_inventory_item
+            deleted = delete_inventory_item(phone=catalog_phone, item_name=del_target)
+            invalidate_inventory_cache(catalog_phone)
+            if deleted:
+                return f"🗑️ '{del_target}' ko aapki inventory se delete kar diya gaya hai."
+            else:
+                return f"⚠️ '{del_target}' aapki inventory mein nahi mila."
+        except Exception as del_exc:
+            logger.exception("Fast-path delete failed for '%s': %s", del_target, del_exc)
+            return "⚠️ Inventory item delete nahi ho saka. Kripya dobara try kijiye."
 
     # Fast path: handle common inventory view commands deterministically.
     if _looks_like_inventory_request(transcript):
@@ -1902,12 +1976,33 @@ def process_transcript_message(phone: str, transcript: str, media_id: str = "") 
                 logger.error("GET_INVENTORY failed: %s", inv_exc)
                 return "⚠️ Inventory laane mein problem aayi. Kripya dobara try kijiye."
 
+        if intent == "DELETE_ITEM":
+            cat = str(entry_data.get("category") or "").strip().lower()
+            if not cat:
+                reply = "⚠️ Item ka naam batayein jise inventory se delete karna hai."
+            else:
+                try:
+                    from services.inventory import delete_inventory_item
+                    deleted = delete_inventory_item(phone=catalog_phone, item_name=cat)
+                    invalidate_inventory_cache(catalog_phone)
+                    if deleted:
+                        reply = f"🗑️ '{cat}' ko aapki inventory se delete kar diya gaya hai."
+                    else:
+                        reply = f"⚠️ '{cat}' aapki inventory mein nahi mila."
+                except Exception as inv_exc:
+                    logger.exception("DELETE_ITEM failed '%s': %s", cat, inv_exc)
+                    reply = "⚠️ Inventory item delete nahi ho saka. Kripya dobara try kijiye."
+            if len(extracted) == 1:
+                return reply
+            command_replies.append(reply)
+            continue
+
     # Only sales/expenses need inventory context. Command-only messages avoid
     # an extra database query because they were already handled above.
     extracted = [
         entry for entry in extracted
         if str(entry.get("intent") or "ADD_ENTRY").upper()
-        not in ("UDHARI_ADD", "UDHARI_PAYMENT", "UDHARI_QUERY", "UDHARI_REPORT")
+        not in ("UDHARI_ADD", "UDHARI_PAYMENT", "UDHARI_QUERY", "UDHARI_REPORT", "DELETE_ITEM", "GET_REPORT", "GET_INVENTORY")
     ]
     needs_inventory = any(
         str(entry.get("intent") or "ADD_ENTRY").upper() == "ADD_ENTRY"
@@ -2073,8 +2168,14 @@ def _save_and_reply(phone: str, entries: List[Dict[str, Any]], media_url: str, c
     invalidate_inventory_cache(catalog_phone)
     reply_parts = []
     if parts:
-        reply_parts.append("✅ " + ", ".join(parts))
-        reply_parts.append(f"Current profit: {_format_inr(current_profit)}")
+        formatted = ", ".join(parts)
+        if total_income > 0 or total_expense > 0:
+            reply_parts.append("✅ " + formatted)
+            reply_parts.append(f"Current profit: {_format_inr(current_profit)}")
+        else:
+            if not formatted.startswith("🗑️") and not formatted.startswith("⚠️"):
+                formatted = "✅ " + formatted
+            reply_parts.append(formatted)
     if inventory_confirmations:
         reply_parts.append("🔄 Updated: " + " | ".join(inventory_confirmations))
     if stock_alert_lines:
@@ -2222,6 +2323,7 @@ __all__ = [
     "is_audio_message",
     "process_transcript_message",
     "process_voice_message",
+    "match_delete_item",
     "run_instant_stock_alert_job",
     "run_weekly_summary_job",
 ]

@@ -13,6 +13,7 @@ Handles:
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from collections import defaultdict
@@ -114,8 +115,21 @@ def get_inventory(phone: str) -> List[Dict[str, Any]]:
     # ── Merge both sources ────────────────────────────────────────────────────
     all_items: List[Dict[str, Any]] = []
 
-    # All items seen in ledger (voice data)
-    all_item_names = set(item_days.keys()) | set(manual_items.keys())
+    # Fetch all items explicitly soft-deleted by the vendor to prevent resurrecting them
+    inactive_rows = list(db[TABLE].find({
+        "phone": {"$in": phone_variants},
+        "is_active": False,
+    }, {"item_name": 1, "item_name_hi": 1}))
+    deleted_names = set()
+    for row in inactive_rows:
+        if row.get("item_name"):
+            deleted_names.add(str(row["item_name"]).strip().lower())
+        if row.get("item_name_hi"):
+            deleted_names.add(str(row["item_name_hi"]).strip().lower())
+
+    # Only include voice items that have NOT been explicitly deleted by the vendor
+    voice_item_names = set(item_days.keys()) - deleted_names
+    all_item_names = voice_item_names | set(manual_items.keys())
 
     for item_name in sorted(all_item_names):
         if item_name in manual_items:
@@ -247,6 +261,15 @@ def upsert_inventory_item(
             "is_active": True,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
+        # Ensure any soft-deleted historical rows for this item are reactivated
+        db[TABLE].update_many(
+            {
+                "phone": {"$in": phone_variants},
+                "item_name": item_name.lower().strip(),
+                "is_active": False,
+            },
+            {"$set": {"is_active": True, "updated_at": datetime.now(timezone.utc).isoformat()}}
+        )
 
         db[TABLE].update_one({"_id": existing_id}, {"$set": payload})
         payload["id"] = str(existing_id)
@@ -276,14 +299,41 @@ def delete_inventory_item(phone: str, item_name: str) -> bool:
     """Soft-delete an inventory item (marks is_active=False for all dates)."""
     db = get_db()
     phone_variants = get_phone_variants(phone) if phone != "web-client" else ["web-client"]
+    cleaned = (item_name or "").strip().lower()
+    if not cleaned:
+        return False
+
+    escaped = re.escape(cleaned)
     result = db[TABLE].update_many(
         {
             "phone": {"$in": phone_variants},
-            "item_name": item_name.lower().strip(),
+            "$or": [
+                {"item_name": {"$regex": f"^{escaped}$", "$options": "i"}},
+                {"item_name_hi": {"$regex": f"^{escaped}$", "$options": "i"}},
+            ],
             "is_active": {"$ne": False},
         },
-        {"$set": {"is_active": False}}
+        {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc).isoformat()}}
     )
+
+    # If the item only existed in voice ledger history (not yet in manual inventory table),
+    # record an inactive inventory row so get_inventory won't resurrect it
+    if result.modified_count == 0 and result.matched_count == 0:
+        canonical_phone = _normalize_phone(phone) if phone != "web-client" else "web-client"
+        db[TABLE].update_one(
+            {"phone": canonical_phone, "item_name": cleaned, "stock_date": _today()},
+            {"$set": {
+                "phone": canonical_phone,
+                "item_name": cleaned,
+                "item_name_hi": cleaned,
+                "is_active": False,
+                "stock_date": _today(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }},
+            upsert=True,
+        )
+        return True
+
     return bool(result.modified_count or result.matched_count)
 
 

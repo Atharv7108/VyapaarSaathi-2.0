@@ -7,7 +7,9 @@ from services.voice_ledger import (
     _looks_like_multiple_udhari,
     _looks_like_inventory_request,
     _looks_like_pnl_report_request,
+    match_delete_item,
     normalize_spoken_numbers,
+    process_transcript_message,
     save_to_db,
 )
 from services.conversation_engine import analyze_voice_input
@@ -266,3 +268,94 @@ def test_save_rejects_income_without_amount_or_known_price(monkeypatch):
             },
             audio_url="",
         )
+
+
+@pytest.mark.parametrize(
+    "phrase,expected_item",
+    [
+        ("dhokla delet karo", "dhokla"),
+        ("dhokla delete karo", "dhokla"),
+        ("dhokla delete", "dhokla"),
+        ("delete dhokla", "dhokla"),
+        ("remove dhokla", "dhokla"),
+        ("dhokla remove karo", "dhokla"),
+        ("dhokla hatao", "dhokla"),
+        ("dhokla hata do", "dhokla"),
+        ("dhokla nikaal do", "dhokla"),
+        ("dhokla ko delete karo", "dhokla"),
+        ("dhokla ko inventory se delete karo", "dhokla"),
+        ("inventory se dhokla delete karo", "dhokla"),
+        ("inventory se dhokla hata do", "dhokla"),
+        ("dhokla item delete karo", "dhokla"),
+        ("dhokla stock hata do", "dhokla"),
+        ("dhokla stock delete karo", "dhokla"),
+        ("meri inventory se dhokla delete karo", "dhokla"),
+        ("ढोकला डिलीट करो", "ढोकला"),
+        ("ढोकला हटाओ", "ढोकला"),
+        ("ढोकला हटा दो", "ढोकला"),
+        ("डिलीट ढोकला", "ढोकला"),
+        ("इन्वेंटरी से ढोकला डिलीट करो", "ढोकला"),
+    ],
+)
+def test_match_delete_item_detects_all_variants(phrase, expected_item):
+    assert match_delete_item(phrase) == expected_item
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "10 dhokla becha",
+        "dhokla 20 bech diya",
+        "dhokla stock 50",
+        "50 samosa stock update karo",
+        "dhokla ka rate 20 rupay",
+        "mera hisaab bhejo",
+        "inventory dikhao",
+        "mera stock dikhao",
+        "dhokla khareeda 200",
+        "Ramesh ko 500 udhari diya",
+        "Ramesh ne 500 diya",
+    ],
+)
+def test_match_delete_item_ignores_non_delete(phrase):
+    assert match_delete_item(phrase) is None
+
+
+def test_inventory_request_detector_ignores_delete_commands():
+    assert not _looks_like_inventory_request("inventory se dhokla delete karo")
+    assert not _looks_like_inventory_request("dhokla inventory se delete karo")
+    assert not _looks_like_inventory_request("dhokla ko inventory se hata do")
+    assert not _looks_like_inventory_request("dhokla delet karo")
+    assert not _looks_like_inventory_request("meri inventory se samosa hatao")
+    # Pure view commands should still match
+    assert _looks_like_inventory_request("meri inventory dekhni hai")
+    assert _looks_like_inventory_request("mera stock dikhao")
+
+
+def test_delete_inventory_item_fast_path(monkeypatch):
+    deleted_calls = []
+
+    def mock_delete(phone, item_name):
+        deleted_calls.append((phone, item_name))
+        return True
+
+    monkeypatch.setattr("services.inventory.delete_inventory_item", mock_delete)
+    monkeypatch.setattr("services.voice_ledger.invalidate_inventory_cache", lambda _p: None)
+
+    reply = process_transcript_message("whatsapp:+919999999999", "dhokla delet karo")
+    assert "dhokla" in reply
+    assert "delete kar diya gaya" in reply
+    assert "Current profit" not in reply
+    assert len(deleted_calls) == 1
+    assert deleted_calls[0] == ("whatsapp:+919999999999", "dhokla")
+
+
+def test_delete_inventory_item_not_found(monkeypatch):
+    monkeypatch.setattr("services.inventory.delete_inventory_item", lambda phone=None, item_name=None: False)
+    monkeypatch.setattr("services.voice_ledger.invalidate_inventory_cache", lambda _p: None)
+
+    reply = process_transcript_message("whatsapp:+919999999999", "dhokla delet karo")
+    assert "dhokla" in reply
+    assert "nahi mila" in reply
+    assert "Current profit" not in reply
+
