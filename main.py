@@ -1,5 +1,7 @@
 import os
 import logging
+import threading
+import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -101,6 +103,42 @@ from services.udhari import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Meta retries webhook events. Keep a bounded in-process guard so a retry
+# cannot trigger another WhatsApp reply while this service process is running.
+_processed_webhook_message_ids: Dict[str, float] = {}
+_processed_webhook_lock = threading.Lock()
+_WEBHOOK_DEDUPE_TTL_SECONDS = 24 * 60 * 60
+_WEBHOOK_DEDUPE_MAX_SIZE = 10000
+
+
+def _is_duplicate_webhook_message(message_id: str) -> bool:
+    """Return whether a Meta message ID was already queued for processing."""
+    if not message_id:
+        return False
+
+    now = time.monotonic()
+    with _processed_webhook_lock:
+        expired_before = now - _WEBHOOK_DEDUPE_TTL_SECONDS
+        expired_ids = [
+            event_id
+            for event_id, seen_at in _processed_webhook_message_ids.items()
+            if seen_at < expired_before
+        ]
+        for event_id in expired_ids:
+            _processed_webhook_message_ids.pop(event_id, None)
+
+        if message_id in _processed_webhook_message_ids:
+            return True
+
+        if len(_processed_webhook_message_ids) >= _WEBHOOK_DEDUPE_MAX_SIZE:
+            oldest_id = min(
+                _processed_webhook_message_ids,
+                key=_processed_webhook_message_ids.get,
+            )
+            _processed_webhook_message_ids.pop(oldest_id, None)
+        _processed_webhook_message_ids[message_id] = now
+        return False
 
 
 @asynccontextmanager
@@ -591,42 +629,47 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 
-                messages = value.get("messages", [])
-                if not messages:
-                    continue
-                    
-                msg = messages[0]
-                sender = f"whatsapp:+{msg.get('from')}"
-                
-                msg_type = msg.get("type")
-                # Voice/audio message — main use case
-                if msg_type == "audio":
-                    media_id = msg.get("audio", {}).get("id")
-                    if media_id:
-                        background_tasks.add_task(_process_and_reply, sender, str(media_id))
-                # Plain text — used for onboarding name/business capture
-                elif msg_type == "text":
-                    text_body = msg.get("text", {}).get("body", "").strip()
-                    background_tasks.add_task(_handle_text_message, sender, text_body)
-                # Interactive button reply (consent Yes/No)
-                elif msg_type == "interactive":
-                    interactive = msg.get("interactive", {})
-                    inter_type = interactive.get("type")  # "button_reply" or "list_reply"
-                    if inter_type == "button_reply":
-                        reply = interactive.get("button_reply", {})
-                        background_tasks.add_task(
-                            _handle_interactive_reply, sender,
-                            reply.get("id", ""), reply.get("title", "")
-                        )
-                    elif inter_type == "list_reply":
-                        reply = interactive.get("list_reply", {})
-                        background_tasks.add_task(
-                            _handle_interactive_reply, sender,
-                            reply.get("id", ""), reply.get("title", "")
-                        )
-                else:
-                    # Stickers, images, etc. — not supported
-                    background_tasks.add_task(_send_safe_reply, sender, NON_AUDIO_RESPONSE)
+                for msg in value.get("messages", []):
+                    message_id = str(msg.get("id") or "").strip()
+                    if _is_duplicate_webhook_message(message_id):
+                        logger.info("Ignoring duplicate WhatsApp webhook message: %s", message_id)
+                        continue
+
+                    sender_number = str(msg.get("from") or "").strip()
+                    if not sender_number:
+                        logger.warning("Ignoring WhatsApp message without a sender: %s", message_id)
+                        continue
+                    sender = f"whatsapp:+{sender_number}"
+
+                    msg_type = msg.get("type")
+                    # Voice/audio message — main use case
+                    if msg_type == "audio":
+                        media_id = msg.get("audio", {}).get("id")
+                        if media_id:
+                            background_tasks.add_task(_process_and_reply, sender, str(media_id))
+                    # Plain text — used for onboarding name/business capture
+                    elif msg_type == "text":
+                        text_body = msg.get("text", {}).get("body", "").strip()
+                        background_tasks.add_task(_handle_text_message, sender, text_body)
+                    # Interactive button reply (consent Yes/No)
+                    elif msg_type == "interactive":
+                        interactive = msg.get("interactive", {})
+                        inter_type = interactive.get("type")  # "button_reply" or "list_reply"
+                        if inter_type == "button_reply":
+                            reply = interactive.get("button_reply", {})
+                            background_tasks.add_task(
+                                _handle_interactive_reply, sender,
+                                reply.get("id", ""), reply.get("title", "")
+                            )
+                        elif inter_type == "list_reply":
+                            reply = interactive.get("list_reply", {})
+                            background_tasks.add_task(
+                                _handle_interactive_reply, sender,
+                                reply.get("id", ""), reply.get("title", "")
+                            )
+                    else:
+                        # Stickers, images, etc. — not supported
+                        background_tasks.add_task(_send_safe_reply, sender, NON_AUDIO_RESPONSE)
                     
         return Response(content="EVENT_RECEIVED", status_code=200)
     except Exception as e:

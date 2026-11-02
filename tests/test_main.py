@@ -109,3 +109,37 @@ def test_autopilot_endpoint_normalizes_vendor_phone(monkeypatch):
     assert response.status_code == 200
     assert captured["phone"] == "whatsapp:+919999999999"
     assert response.json()["summary"]["active_days"] == 1
+
+
+def test_webhook_ignores_duplicate_message_id(monkeypatch):
+    _configure_env(monkeypatch)
+    main_module._processed_webhook_message_ids.clear()
+    received = []
+    monkeypatch.setattr(
+        main_module,
+        "_handle_text_message",
+        lambda sender, text: received.append((sender, text)),
+    )
+    client = TestClient(main_module.app)
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "value": {
+                    "messages": [{
+                        "id": "wamid.duplicate-test",
+                        "from": "919999999999",
+                        "type": "text",
+                        "text": {"body": "hello"},
+                    }]
+                }
+            }]
+        }],
+    }
+
+    first = client.post("/webhook", json=payload)
+    second = client.post("/webhook", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert received == [("whatsapp:+919999999999", "hello")]
